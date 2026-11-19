@@ -130,9 +130,22 @@ try {
   $env:GIT_ASKPASS = $askpass
   $env:GIT_TERMINAL_PROMPT = "0"
   $env:TRADEDESK_TOKEN = $token
+  $pushed = @()
+  $failed = @()
+  $ErrorActionPreference = "Continue"   # 原生命令的 stderr 不要把它变成终止性错误
   try {
     foreach ($b in @("main", "agent-a", "agent-b")) {
-      & $git push -u $Remote $b 2>&1 | Select-Object -Last 2 | ForEach-Object { "  $_" }
+      Write-Host "  推送 $b ..." -ForegroundColor DarkGray
+      $out = & $git push -u $Remote $b 2>&1
+      $code = $LASTEXITCODE
+      $out | ForEach-Object { "    $_" }
+      if ($code -eq 0) {
+        $pushed += $b
+        Write-Host "    ✓ $b 推送成功" -ForegroundColor Green
+      } else {
+        $failed += $b
+        Write-Host "    ✗ $b 推送失败（exit=$code）" -ForegroundColor Red
+      }
     }
   } finally {
     Remove-Item -LiteralPath $askpass -Force -ErrorAction SilentlyContinue
@@ -140,9 +153,20 @@ try {
     $env:GIT_ASKPASS = $null
   }
 
-  Write-Host "=== 5/5 完成 ===" -ForegroundColor Cyan
+  Write-Host "=== 5/5 核验远端分支 ===" -ForegroundColor Cyan
+  $ErrorActionPreference = "Continue"
+  $ls = & $git ls-remote --heads $Remote 2>&1
+  $ls | ForEach-Object { "  $_" }
+  $remoteBranches = @($ls | Where-Object { $_ -match "refs/heads/" } | ForEach-Object { ($_ -split "refs/heads/")[1] })
+  Write-Host "  远端实际分支：$($remoteBranches -join ', ')" -ForegroundColor Green
+  $missing = @("main", "agent-a", "agent-b") | Where-Object { $remoteBranches -notcontains $_ }
+  if ($missing.Count -gt 0) {
+    Write-Host "  ✗ 以下分支未成功推送：$($missing -join ', ')" -ForegroundColor Red
+    Write-Host "  仓库地址：https://github.com/$Owner/$RepoName" -ForegroundColor Yellow
+    exit 2
+  }
+  Write-Host "  ✓ main / agent-a / agent-b 均已在远端" -ForegroundColor Green
   Write-Host "  仓库地址：https://github.com/$Owner/$RepoName" -ForegroundColor Green
-  Write-Host "  已推送：main / agent-a / agent-b" -ForegroundColor Green
   Write-Host "  网页可能仍打不开（网络问题），用 git 确认：" -ForegroundColor Yellow
   Write-Host "    git ls-remote $repoUrl" -ForegroundColor Yellow
 }
