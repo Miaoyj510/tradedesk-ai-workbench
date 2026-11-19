@@ -1,6 +1,9 @@
 pydantic>=2.7,<3
 pytest>=8
 
+# PostgreSQL 后端（S1 已依赖：store/postgres_store.py 延迟导入 psycopg）
+psycopg[binary]>=3.2
+
 # S2 起需要
 # fastapi>=0.115
 # uvicorn>=0.34
