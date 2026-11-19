@@ -130,9 +130,19 @@ function Invoke-GitCapture {
 try {
   $okBranches = @()
   $apiUsed = $false
+  # 代理不可用时，github.com 的 git 流量根本出不去 —— 直接走 API 通道，不做无谓重试
+  $proxyOk = $false
+  if ($proxy) {
+    $env:http_proxy = $proxy; $env:https_proxy = $proxy
+    & $cmdExe /c "`"$git`" -c http.proxy=$proxy ls-remote --exit-code https://github.com/octocat/Hello-World.git > NUL 2>&1"
+    $proxyOk = ($LASTEXITCODE -eq 0)
+    if (-not $proxyOk) {
+      Write-Host "    [代理不可用] $proxy 连不通 —— 跳过 git 通道，改走 GitHub API" -ForegroundColor Yellow
+    }
+  }
   foreach ($b in $Branches) {
     $pushed = $false
-    if (-not $ApiOnly) {
+    if (-not $ApiOnly -and $proxyOk) {
       for ($i = 1; $i -le $Retries; $i++) {
         Write-Host "  [$b] git push 第 $i/$Retries 次 ..." -ForegroundColor DarkGray
         $code = Invoke-GitCapture @("-c", "http.sslVersion=tlsv1.2", "-c", "credential.helper=", "push", "-u", "origin", $b)
@@ -149,7 +159,7 @@ try {
       }
     }
     if (-not $pushed) {
-      Write-Host "  [$b] 改走 GitHub API 通道 ..." -ForegroundColor DarkGray
+      Write-Host "  [$b] 走 GitHub API 通道（逐个复刻提交，远端 SHA 与本地一致）..." -ForegroundColor DarkGray
       $env:TRADEDESK_GITHUB_TOKEN = $token
       & $py (Join-Path $Root "scripts\push_via_api.py") --owner $Owner --repo $Repo --branches $b
       if ($LASTEXITCODE -eq 0) { $apiUsed = $true; $okBranches += $b }
@@ -157,10 +167,16 @@ try {
   }
 
   Write-Host "=== 核验远端分支 ===" -ForegroundColor Cyan
-  $code = Invoke-GitCapture @("-c", "credential.helper=", "ls-remote", "--heads", "origin")
+  # 用 API 读远端 ref（不依赖代理）
+  $remote = @()
   $ls = @()
-  if (Test-Path -LiteralPath $logFile) { $ls = @(Get-Content -LiteralPath $logFile -ErrorAction SilentlyContinue | Where-Object { $_ -match "refs/heads/" }) }
-  $remote = @($ls | ForEach-Object { ($_ -split "refs/heads/")[1] })
+  $pyApi = Get-PythonExe
+  $env:TRADEDESK_GITHUB_TOKEN = $token
+  $raw = & $pyApi (Join-Path $Root "scripts\remote_refs.py") --owner $Owner --repo $Repo
+  if ($LASTEXITCODE -eq 0 -and $raw) {
+    $ls = @($raw -split "`r?`n" | Where-Object { $_ -match "refs/heads/" })
+    $remote = @($ls | ForEach-Object { ($_ -split "refs/heads/")[1] })
+  }
   Write-Host "  远端现有分支：$($remote -join ', ')" -ForegroundColor Green
   $missing = @($Branches | Where-Object { $remote -notcontains $_ })
   if ($missing.Count -gt 0) {
