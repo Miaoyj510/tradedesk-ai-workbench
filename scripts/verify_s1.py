@@ -135,6 +135,14 @@ def scenario_1_seed(store: SqliteStateStore) -> None:
     check("T-1042 未决问题保留 2 条", t42 is not None and len(t42.open_questions) == 2)
     check("T-1043 带名单命中标记", store.get_thread("T-1043") is not None
           and "sanction_hit" in store.get_thread("T-1043").status_flags)
+    # 看板按阶段/语种筛选（FR-ORC-10）：枚举和字符串都要能筛。
+    # ⚠ str(Stage.QUOTING) 是 "Stage.QUOTING"，用它筛会静默返回空列表。
+    check("按阶段筛选（传枚举）可用", len(store.list_threads(stage=Stage.QUOTING)) == 1,
+          f"实际 {len(store.list_threads(stage=Stage.QUOTING))}")
+    check("按阶段筛选（传字符串）可用", len(store.list_threads(stage="QUOTING")) == 1,
+          f"实际 {len(store.list_threads(stage='QUOTING'))}")
+    check("按语种筛选（传枚举）可用", len(store.list_threads(language=Language.AR)) == 1,
+          f"实际 {len(store.list_threads(language=Language.AR))}")
 
 
 def scenario_2_transitions(store: SqliteStateStore) -> None:

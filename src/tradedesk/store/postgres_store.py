@@ -20,7 +20,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import audit_hash
+from .base import audit_hash, enum_val
 from ..domain.models import (
     AuditEntry,
     CustomerProfile,
@@ -187,8 +187,8 @@ class PostgresStateStore:
                 "VALUES(%s,%s,%s,%s,%s,%s, now())",
                 (
                     thread.thread_id, thread.buyer_id,
-                    thread.stage.value if hasattr(thread.stage, "value") else str(thread.stage),
-                    thread.language.value if hasattr(thread.language, "value") else str(thread.language),
+                    enum_val(thread.stage),
+                    enum_val(thread.language),
                     thread.version,
                     json.dumps(thread.model_dump(mode="json"), ensure_ascii=False, default=_json_default),
                 ),
@@ -207,8 +207,8 @@ class PostgresStateStore:
                 "UPDATE threads SET stage=%s, language=%s, version=%s, payload=%s, updated_at=now() "
                 "WHERE thread_id=%s AND version=%s",
                 (
-                    thread.stage.value if hasattr(thread.stage, "value") else str(thread.stage),
-                    thread.language.value if hasattr(thread.language, "value") else str(thread.language),
+                    enum_val(thread.stage),
+                    enum_val(thread.language),
                     thread.version,
                     json.dumps(thread.model_dump(mode="json"), ensure_ascii=False, default=_json_default),
                     thread.thread_id, thread.version - 1,
@@ -226,7 +226,11 @@ class PostgresStateStore:
         sql, params = "SELECT payload FROM threads", []
         clauses = []
         if filters.get("stage"):
-            clauses.append("stage=%s"); params.append(str(filters["stage"]))
+            # enum_val：不能写 str(filters["stage"]) —— str(Stage.QUOTING) 是
+            # "Stage.QUOTING"，用它筛会一条都查不到（看板按阶段筛选会静默返回空）
+            clauses.append("stage=%s"); params.append(enum_val(filters["stage"]))
+        if filters.get("language"):
+            clauses.append("language=%s"); params.append(enum_val(filters["language"]))
         if filters.get("buyer_id"):
             clauses.append("buyer_id=%s"); params.append(filters["buyer_id"])
         if clauses:
