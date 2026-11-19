@@ -10,19 +10,21 @@ from typing import Optional
 from fastapi import Header, HTTPException, Request
 
 from ..agents.inquiry import InquiryAgent
+from ..data.kb_seed import KB_VERSION, load_kb
 from ..agents.registry import MERCH_SPEC, GROWTH_SPEC, Registry
 from ..agents.sentinel import SentinelAgent
 from ..config import Config, get_settings
 from ..runtime.gates import GateTokenService
+from ..retrieval.store_retriever import StoreRetriever
 from ..runtime.supervisor import Supervisor
 from ..store.base import StateStore
 from ..store.sqlite_store import SqliteStateStore
 
 
-def build_registry() -> Registry:
+def build_registry(retriever=None) -> Registry:
     """注册本期两个实现型角色 + 两个仅声明型角色。"""
     reg = Registry()
-    reg.register(InquiryAgent())
+    reg.register(InquiryAgent(retriever=retriever))
     reg.register(SentinelAgent())
     reg.register_spec(MERCH_SPEC)
     reg.register_spec(GROWTH_SPEC)
@@ -35,8 +37,18 @@ class AppContext:
     def __init__(self, store: StateStore, registry: Optional[Registry] = None,
                  config: Optional[Config] = None) -> None:
         self.store = store
-        self.registry = registry or build_registry()
         self.config = config or get_settings()
+        # 知识库：库里没有或版本对不上时才重新灌种子（生产应走版本化发布，见 PRD 13.4.8）
+        self.kb_version = self.config.kb_version or KB_VERSION
+        try:
+            existing = self.store.list_kb_chunks(self.kb_version)
+            if not existing:
+                load_kb(self.store, self.kb_version)
+        except Exception as exc:
+            # 灌种子失败不阻断启动：检索层降级为"空库"，Agent 走低置信兜底
+            print(f"[deps] 知识库种子灌入失败（检索将返回空结果）：{exc}")
+        self.retriever = StoreRetriever(self.store, self.kb_version)
+        self.registry = registry or build_registry(retriever=self.retriever)
         self.tokens = GateTokenService(store, ttl_seconds=self.config.gate_token_ttl_s)
         self.supervisor = Supervisor(
             store=store, registry=self.registry, token_service=self.tokens,

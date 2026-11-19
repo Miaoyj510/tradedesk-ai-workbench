@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .base import ConcurrentUpdate, audit_hash, enum_val
 from ..domain.models import (
+    KBChunk,
     AuditEntry,
     CustomerProfile,
     GateToken,
@@ -80,6 +81,26 @@ CREATE TABLE IF NOT EXISTS audit_log (
     prev_hash TEXT NOT NULL,
     hash      TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS kb_chunks (
+    chunk_id        TEXT PRIMARY KEY,
+    doc_id         TEXT NOT NULL,
+    doc_type       TEXT NOT NULL,
+    title          TEXT NOT NULL DEFAULT '',
+    text           TEXT NOT NULL,
+    lang           TEXT NOT NULL DEFAULT 'zh',
+    identifiers    JSONB NOT NULL DEFAULT '{}'::jsonb,
+    countries      JSONB NOT NULL DEFAULT '[]'::jsonb,
+    hs_codes       JSONB NOT NULL DEFAULT '[]'::jsonb,
+    tags           JSONB NOT NULL DEFAULT '[]'::jsonb,
+    effective_from TIMESTAMPTZ,
+    effective_to   TIMESTAMPTZ,
+    valid_until    TIMESTAMPTZ,
+    kb_version     TEXT NOT NULL DEFAULT '',
+    extra          JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_kb_version ON kb_chunks(kb_version);
+CREATE INDEX IF NOT EXISTS idx_kb_doc_type ON kb_chunks(doc_type);
+
 CREATE TABLE IF NOT EXISTS gate_tokens (
     token       TEXT PRIMARY KEY,
     thread_id   TEXT NOT NULL,
@@ -369,6 +390,58 @@ class PostgresStateStore:
         return True, None
 
     # ---------- 闸门令牌 ----------
+    # ---------- 知识库 ----------
+    def upsert_kb_chunk(self, chunk) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO kb_chunks(chunk_id, doc_id, doc_type, title, text, lang, identifiers, "
+                "countries, hs_codes, tags, effective_from, effective_to, valid_until, kb_version, extra) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (chunk_id) DO UPDATE SET doc_id=EXCLUDED.doc_id, "
+                "doc_type=EXCLUDED.doc_type, title=EXCLUDED.title, text=EXCLUDED.text, "
+                "lang=EXCLUDED.lang, identifiers=EXCLUDED.identifiers, countries=EXCLUDED.countries, "
+                "hs_codes=EXCLUDED.hs_codes, tags=EXCLUDED.tags, "
+                "effective_from=EXCLUDED.effective_from, effective_to=EXCLUDED.effective_to, "
+                "valid_until=EXCLUDED.valid_until, kb_version=EXCLUDED.kb_version, extra=EXCLUDED.extra",
+                (
+                    chunk.chunk_id, chunk.doc_id, chunk.doc_type, chunk.title, chunk.text, chunk.lang,
+                    json.dumps(chunk.identifiers, ensure_ascii=False),
+                    json.dumps(chunk.countries, ensure_ascii=False),
+                    json.dumps(chunk.hs_codes, ensure_ascii=False),
+                    json.dumps(chunk.tags, ensure_ascii=False),
+                    chunk.effective_from, chunk.effective_to, chunk.valid_until,
+                    chunk.kb_version, json.dumps(chunk.extra, ensure_ascii=False),
+                ),
+            )
+
+    def list_kb_chunks(self, kb_version=None):
+        sql, params = "SELECT * FROM kb_chunks", []
+        if kb_version:
+            sql += " WHERE kb_version=%s"
+            params.append(kb_version)
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [
+            KBChunk(
+                chunk_id=r[0], doc_id=r[1], doc_type=r[2], title=r[3], text=r[4], lang=r[5],
+                identifiers=r[6], countries=r[7], hs_codes=r[8], tags=r[9],
+                effective_from=r[10], effective_to=r[11], valid_until=r[12],
+                kb_version=r[13], extra=r[14],
+            )
+            for r in rows
+        ]
+
+    def get_kb_chunk(self, chunk_id):
+        for c in self.list_kb_chunks():
+            if c.chunk_id == chunk_id:
+                return c
+        return None
+
+    def clear_kb(self) -> None:
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM kb_chunks")
+
     def issue_gate_token(self, token: GateToken) -> None:
         with self.conn.cursor() as cur:
             cur.execute(

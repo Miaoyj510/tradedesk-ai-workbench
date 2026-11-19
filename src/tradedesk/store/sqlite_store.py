@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .base import ConcurrentUpdate, ConcurrentUpdate, audit_hash, canonical_ts, enum_val
 from ..domain.models import (
+    KBChunk,
     AuditEntry,
     CustomerProfile,
     GateToken,
@@ -76,6 +77,26 @@ CREATE TABLE IF NOT EXISTS audit_log (
     prev_hash  TEXT NOT NULL,
     hash       TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS kb_chunks (
+    chunk_id        TEXT PRIMARY KEY,
+    doc_id         TEXT NOT NULL,
+    doc_type       TEXT NOT NULL,
+    title          TEXT NOT NULL DEFAULT '',
+    text           TEXT NOT NULL,
+    lang           TEXT NOT NULL DEFAULT 'zh',
+    identifiers    TEXT NOT NULL DEFAULT '{}',
+    countries      TEXT NOT NULL DEFAULT '[]',
+    hs_codes       TEXT NOT NULL DEFAULT '[]',
+    tags           TEXT NOT NULL DEFAULT '[]',
+    effective_from TEXT,
+    effective_to   TEXT,
+    valid_until    TEXT,
+    kb_version     TEXT NOT NULL DEFAULT '',
+    extra          TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_kb_version ON kb_chunks(kb_version);
+CREATE INDEX IF NOT EXISTS idx_kb_doc_type ON kb_chunks(doc_type);
 
 CREATE TABLE IF NOT EXISTS gate_tokens (
     token       TEXT PRIMARY KEY,
@@ -190,6 +211,61 @@ class SqliteStateStore:
             except Exception:
                 pass
             self._shared_conn = None
+
+    # ---------- 知识库 ----------
+    def upsert_kb_chunk(self, chunk) -> None:
+        with self._write_lock:
+            self._conn.execute(
+                "INSERT INTO kb_chunks(chunk_id, doc_id, doc_type, title, text, lang, identifiers, "
+                "countries, hs_codes, tags, effective_from, effective_to, valid_until, kb_version, extra) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chunk_id) DO UPDATE SET "
+                "doc_id=excluded.doc_id, doc_type=excluded.doc_type, title=excluded.title, "
+                "text=excluded.text, lang=excluded.lang, identifiers=excluded.identifiers, "
+                "countries=excluded.countries, hs_codes=excluded.hs_codes, tags=excluded.tags, "
+                "effective_from=excluded.effective_from, effective_to=excluded.effective_to, "
+                "valid_until=excluded.valid_until, kb_version=excluded.kb_version, extra=excluded.extra",
+                (
+                    chunk.chunk_id, chunk.doc_id, chunk.doc_type, chunk.title, chunk.text, chunk.lang,
+                    _dumps(chunk.identifiers), _dumps(chunk.countries), _dumps(chunk.hs_codes),
+                    _dumps(chunk.tags),
+                    chunk.effective_from.isoformat() if chunk.effective_from else None,
+                    chunk.effective_to.isoformat() if chunk.effective_to else None,
+                    chunk.valid_until.isoformat() if chunk.valid_until else None,
+                    chunk.kb_version, _dumps(chunk.extra),
+                ),
+            )
+            self._conn.commit()
+
+    def list_kb_chunks(self, kb_version=None):
+        sql, params = "SELECT * FROM kb_chunks", []
+        if kb_version:
+            sql += " WHERE kb_version=?"
+            params.append(kb_version)
+        rows = self._conn.execute(sql, params).fetchall()
+        return [
+            KBChunk(
+                chunk_id=r["chunk_id"], doc_id=r["doc_id"], doc_type=r["doc_type"], title=r["title"],
+                text=r["text"], lang=r["lang"], identifiers=json.loads(r["identifiers"]),
+                countries=json.loads(r["countries"]), hs_codes=json.loads(r["hs_codes"]),
+                tags=json.loads(r["tags"]),
+                effective_from=datetime.fromisoformat(r["effective_from"]) if r["effective_from"] else None,
+                effective_to=datetime.fromisoformat(r["effective_to"]) if r["effective_to"] else None,
+                valid_until=datetime.fromisoformat(r["valid_until"]) if r["valid_until"] else None,
+                kb_version=r["kb_version"], extra=json.loads(r["extra"]),
+            )
+            for r in rows
+        ]
+
+    def get_kb_chunk(self, chunk_id):
+        for c in self.list_kb_chunks():
+            if c.chunk_id == chunk_id:
+                return c
+        return None
+
+    def clear_kb(self) -> None:
+        with self._write_lock:
+            self._conn.execute("DELETE FROM kb_chunks")
+            self._conn.commit()
 
     # ---------- 演练与验证辅助（生产也可用：篡改演练、令牌过期演练） ----------
     def reset(self) -> None:
