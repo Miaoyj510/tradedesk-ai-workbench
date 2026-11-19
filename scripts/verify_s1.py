@@ -73,8 +73,13 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
     return bool(ok)
 
 
-def purge_artifacts(db_path: Path, postgres: bool = False) -> list:
-    """清理本次验证产生的全部临时物，保证项目目录回到干净状态。"""
+def purge_artifacts(db_path: Path, postgres: bool = False, dsn: str = DEFAULT_DSN) -> list:
+    """清理本次验证产生的全部临时物，保证项目目录回到干净状态。
+
+    `dsn` 必须是**本次实际写入的那个库**：两个 agent 各用各的库
+    （tradedesk_a / tradedesk_b），清理时必须清自己那个，
+    否则会误清对方的库，破坏 WORKFLOW.md 第 4 节的数据库隔离。
+    """
     removed = []
     candidates = [db_path,
                   db_path.with_name(db_path.name + "-wal"),
@@ -94,14 +99,14 @@ def purge_artifacts(db_path: Path, postgres: bool = False) -> list:
                 removed.append(str(p.relative_to(ROOT)))
         except Exception:
             pass
-    # PostgreSQL 侧：清空本次验证写入的数据
+    # PostgreSQL 侧：清空本次验证写入的数据（只清本 agent 自己的库）
     if postgres:
         try:
             from tradedesk.store.postgres_store import PostgresStateStore
-            st = PostgresStateStore(DEFAULT_DSN)
+            st = PostgresStateStore(dsn)
             st.reset()
             st.close()
-            removed.append("postgres://tradedesk@5433/tradedesk (表已清空)")
+            removed.append(f"postgres: {dsn} (表已清空)")
         except Exception:
             pass
     return removed
@@ -392,7 +397,7 @@ def _run_backend(backend: str, args, all_results) -> int:
     all_results.extend(RESULTS)
 
     if not args.keep:
-        removed = purge_artifacts(db_path, postgres=(backend == "postgres"))
+        removed = purge_artifacts(db_path, postgres=(backend == "postgres"), dsn=args.dsn)
         print(f"\n[清理] 已移除 {len(removed)} 项验证临时物：")
         for r in removed:
             print(f"  - {r}")

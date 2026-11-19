@@ -41,16 +41,52 @@ def _hit(patterns, text: str) -> bool:
     return any(p.search(text or "") for p in patterns)
 
 
+# ---- 金额抽取（GATE-11）----
+# 币种标记。金额可能写在数字**前面**（USD 8000），也可能写在**后面**（8000 USD），
+# 两种写法都必须认，否则阈值闸门会被"把币种挪到数字后面"直接绕过。
+CURRENCY_TOKEN = r"(?:usd|eur|cny|rmb|gbp|\$|€|£|dollars?|euros?|美元|欧元|元)"
+
+# 数字紧挨币种：USD 8000 / $8,000 / 8000 USD / 8000 dollars / 8000元
+AMOUNT_WITH_CURRENCY = re.compile(
+    rf"(?:{CURRENCY_TOKEN})\s?(\d[\d,]*(?:\.\d+)?)"
+    rf"|(\d[\d,]*(?:\.\d+)?)\s?(?:{CURRENCY_TOKEN})",
+    re.I,
+)
+
+# 价格语境兜底：语境词后 8 个非数字字符内取最近的数字（总价 8000 / the price is 8000）。
+# 窗口刻意收窄 —— "Total quantity 12000 units" 这种不该被当成金额。
+AMOUNT_BY_CONTEXT = re.compile(
+    r"(?:单价|价格|报价|总价|总额|amount|price|precio|total)\D{0,8}?(\d[\d,]*(?:\.\d+)?)",
+    re.I,
+)
+
+
+def _to_float(raw: str) -> Optional[float]:
+    try:
+        return float(raw.replace(",", ""))
+    except ValueError:
+        return None
+
+
 def _amount_from_draft(draft: Optional[Draft]) -> float:
-    """从草稿中抽取最大金额（用于 GATE-11 阈值判定）。"""
+    """从草稿中抽取最大金额（用于 GATE-11 阈值判定）。
+
+    拿不准就不算金额：宁可漏判，也不能把"250 天""12000 units"这类数字
+    误当金额去卡闸门。已知局限：不同币种按同一阈值比较（阈值是 USD），
+    本期不做汇率换算，见 PRD 13.4.11 的生产化清单。
+    """
     if draft is None:
         return 0.0
-    values = []
-    for m in re.finditer(r"(?:USD|EUR|\$|€)\s?(\d[\d,\.]*)", draft.body, re.I):
-        try:
-            values.append(float(m.group(1).replace(",", "")))
-        except ValueError:
-            pass
+    body = draft.body or ""
+    values: List[float] = []
+    for m in AMOUNT_WITH_CURRENCY.finditer(body):
+        v = _to_float(m.group(1) or m.group(2) or "")
+        if v is not None:
+            values.append(v)
+    for m in AMOUNT_BY_CONTEXT.finditer(body):
+        v = _to_float(m.group(1))
+        if v is not None:
+            values.append(v)
     return max(values) if values else 0.0
 
 
@@ -65,6 +101,12 @@ class GateRule:
 
 
 def _build_rules(low_conf_threshold: float, amount_threshold: float) -> List[GateRule]:
+    """11 条闸门规则。
+
+    `must=True` 对应 PRD 8.5 里"强制人工签核"的那 6 条：GATE-01/02/03/04/10/11
+    —— 逐条签核、不可批量放行。其余 5 条命中后同样阻断流程，但走的是
+    "转人工 / 提示 / 允许追问"的处置方式，不需要逐条签核记录。
+    """
     return [
         GateRule(GateId.PRICE, "价格承诺", True, "草稿含价格/折扣/底价",
                  lambda t, d: bool(d) and _hit(PRICE_PATTERNS, d.body)),
@@ -84,9 +126,9 @@ def _build_rules(low_conf_threshold: float, amount_threshold: float) -> List[Gat
                  lambda t, d: bool(d) and d.needs_human_confirmation),
         GateRule(GateId.COMPLAINT, "投诉意图", False, "默认转人工",
                  lambda t, d: Intent.COMPLAINT in t.intent_labels),
-        GateRule(GateId.REGULATION, "目的国法规时效冲突", False, "按买家国别 + 当前日期过滤",
+        GateRule(GateId.REGULATION, "目的国法规时效冲突", True, "按买家国别 + 当前日期过滤",
                  lambda t, d: "regulation_conflict" in t.status_flags),
-        GateRule(GateId.THRESHOLD, "金额阈值 / 敏感客户", False, f"单笔 ≥ {amount_threshold} 需签核",
+        GateRule(GateId.THRESHOLD, "金额阈值 / 敏感客户", True, f"单笔 ≥ {amount_threshold} 需签核",
                  lambda t, d: _amount_from_draft(d) >= amount_threshold),
     ]
 

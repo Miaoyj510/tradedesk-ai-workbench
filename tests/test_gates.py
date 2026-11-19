@@ -23,7 +23,12 @@ def _draft(body="Hola", **kw):
 def test_eleven_rules():
     gates = evaluate_gates(_thread(), None)
     assert len(gates) == 11
-    assert sum(1 for g in gates if g.must) == 4      # 价格/交期/名单/合同 强制
+    # PRD 8.5 里标"强制人工签核"的 6 条：价格/交期/名单/合同/法规时效/金额阈值
+    assert sum(1 for g in gates if g.must) == 6
+    assert {g.gate_id for g in gates if g.must} == {
+        GateId.PRICE, GateId.DELIVERY, GateId.SANCTION,
+        GateId.CONTRACT, GateId.REGULATION, GateId.THRESHOLD,
+    }
 
 
 def test_price_and_delivery_hit():
@@ -52,6 +57,31 @@ def test_amount_threshold_gate():
     d = _draft("USD 9000 per container")
     hits = {g.gate_id for g in blocking_gates(evaluate_gates(_thread(), d))}
     assert GateId.THRESHOLD in hits
+
+
+def test_amount_threshold_gate_currency_after_number():
+    """币种写在数字**后面**同样要命中。
+
+    只认 "USD 8000" 的话，把币种挪到数字后面就能绕过金额阈值闸门。
+    """
+    for body in ("Total 8000 USD", "8000 USD in total", "我们会给你 8000 美元"):
+        d = _draft(body)
+        hits = {g.gate_id for g in blocking_gates(evaluate_gates(_thread(), d))}
+        assert GateId.THRESHOLD in hits, body
+
+
+def test_amount_threshold_gate_price_context():
+    d = _draft("总价 8000")
+    hits = {g.gate_id for g in blocking_gates(evaluate_gates(_thread(), d))}
+    assert GateId.THRESHOLD in hits
+
+
+def test_amount_threshold_ignores_non_amount_numbers():
+    """天数、数量、重量不是金额 —— 误判会把正常草稿全卡死在闸门上。"""
+    for body in ("Delivery in 250 days", "Total quantity 12000 units", "Weight 8000 kg"):
+        d = _draft(body)
+        hits = {g.gate_id for g in blocking_gates(evaluate_gates(_thread(), d))}
+        assert GateId.THRESHOLD not in hits, body
 
 
 def test_token_single_use(tmpdir_local):
