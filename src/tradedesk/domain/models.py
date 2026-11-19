@@ -63,12 +63,20 @@ class Citation(BaseModel):
 
 
 class Handoff(BaseModel):
-    """Agent 间交接（PRD 8.4 的必填字段在 Agent 间传递的载体）。"""
+    """Agent 间交接（PRD 8.4 的必填字段在 Agent 间传递的载体）。
+
+    PRD 8.4 的必填项共 **15 个字段**（表里 13 行，其中两行各含 2 个字段）：
+    from_agent / to_agent / thread_id / buyer_id / handoff_reason /
+    buyer_profile_digest / committed_items / open_questions / deadlines /
+    stage / evidence_refs / risk_level / language / idempotency_key / pending_decision
+    """
 
     from_agent: str
     to_agent: str
-    reason: str
-    buyer_profile_digest: str
+    thread_id: str = ""
+    buyer_id: str = ""
+    handoff_reason: str = ""
+    buyer_profile_digest: str = ""
     committed_items: List[CommittedItem] = Field(default_factory=list)
     open_questions: List[OpenQuestion] = Field(default_factory=list)
     deadlines: List[Deadline] = Field(default_factory=list)
@@ -80,6 +88,11 @@ class Handoff(BaseModel):
     pending_decision: str
     handed_off_at: datetime = Field(default_factory=utcnow)
 
+    @property
+    def reason(self) -> str:
+        """别名：PRD 用 handoff_reason，旧调用用 reason。"""
+        return self.handoff_reason
+
 
 class CustomerProfile(BaseModel):
     """客户档案：跨线程共享（PRD 8.3 双层状态的客户层）。"""
@@ -90,6 +103,9 @@ class CustomerProfile(BaseModel):
     contact: str = ""
     risk_flags: List[str] = Field(default_factory=list)
     known_requirements: Dict[str, Any] = Field(default_factory=dict)
+    # PRD 8.3：历史沟通摘要（"历史要点"落在它上面）与话术偏好
+    contact_history_digest: str = ""
+    preference_profile: Dict[str, Any] = Field(default_factory=dict)
     linked_threads: List[str] = Field(default_factory=list)
     last_seen_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
@@ -156,11 +172,16 @@ class Draft(BaseModel):
 
 
 class GateToken(BaseModel):
-    """闸门令牌：写操作（发送、推进阶段）必须携带，服务端签发、一次性消费。"""
+    """闸门令牌：写操作（签核 / 发送 / 推进阶段）必须携带，服务端签发、一次性消费。
+
+    PRD 8.9「写工具必须绑定闸门 token」的落点：**令牌要写明它授权的是哪个动作**，
+    否则一张为"发送"签发的令牌能被拿去推进阶段（FR-ORC-09 的漏洞）。
+    """
 
     token: str
     thread_id: str
     draft_id: str
+    action: str = ""          # sign_off / send_draft / advance_stage
     gates: List[GateId]
     issued_at: datetime = Field(default_factory=utcnow)
     expires_at: datetime

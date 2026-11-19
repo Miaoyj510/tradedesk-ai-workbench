@@ -23,10 +23,23 @@ from ..domain.enums import Actor, EventType, GateId, Intent, Language, RiskLevel
 from ..domain.models import Draft, Gate, ThreadEvent, ThreadState
 from ..domain.state_machine import TransitionRejected, apply_transition, build_thread
 from ..store.base import StateStore
-from .gates import GateTokenService, blocking_gates, evaluate_gates
+from .gates import (
+    GateTokenService,
+    blocking_gates,
+    classify_reject_reason,
+    detect_injection,
+    evaluate_gates,
+)
 from .handoff import HandoffRejected, build_handoff, validate_handoff
 
-SLA_DEFAULTS = {"first_response_seconds": 300, "quote_seconds": 3600, "followup_seconds": 86400}
+# SLA 按业务类型可配置（FR-ORC-08：≥ 3 类）
+SLA_DEFAULTS = {
+    "first_response": 300,    # 首响
+    "quote": 3600,            # 报价
+    "followup": 86400,        # 跟进
+}
+# 超时分级升级：业务员 → 经理（FR-ORC-02 / FR-HUM-09）
+ESCALATION_CHAIN = ["业务员", "经理"]
 
 
 class IngestResult(BaseModel):
@@ -61,6 +74,11 @@ class Supervisor:
         self.amount_threshold = amount_threshold
         # 草稿暂存内存（S2 未做草稿持久化；S4 接真检索后改为随事件落库）
         self.drafts: Dict[str, Draft] = {}
+        # 线程号自增（并发下唯一）
+        import threading
+        self._id_lock = threading.Lock()
+        self._id_counter = 0
+        self._id_base = 2000 + len(store.list_threads())
 
     # ------------------------------------------------------------------ 工具
     @staticmethod
@@ -88,11 +106,41 @@ class Supervisor:
         if inquiry is not None:
             from ..agents.inquiry import classify_intent
             intents = classify_intent(message)
+        else:
+            # 未实现 Inquiry：显式返回"本期未实现"，不静默降级
+            return {"target": "not_implemented", "reason": "Inquiry 未注册/未实现", "intents": intents}
         if Intent.COMPLAINT in intents:
             return {"target": "human", "reason": "投诉意图，默认转人工", "intents": intents}
         if Intent.PRICE in intents or Intent.SAMPLE in intents or Intent.SPEC in intents:
             return {"target": "inquiry", "reason": "售前询盘，先风控后应答", "intents": intents}
         return {"target": "inquiry", "reason": "非投诉类询盘", "intents": intents}
+
+    def _sync_customer_profile(self, buyer_id: str, profile: Dict[str, str],
+                               thread: ThreadState, message: str) -> None:
+        """客户档案跨线程共享：同一买家的所有线程登记在 linked_threads，
+        并把历史要点累积进 contact_history_digest（PRD 8.3）。"""
+        from ..domain.models import CustomerProfile
+        customer = self.store.get_customer(buyer_id)
+        if customer is None:
+            customer = CustomerProfile(
+                buyer_id=buyer_id,
+                company=profile.get("company", ""),
+                country=profile.get("country", ""),
+                contact_history_digest=f"{thread.thread_id}: {message[:80]}",
+            )
+        else:
+            if profile.get("company") and customer.company != profile["company"]:
+                customer.company = profile["company"]
+            if profile.get("country") and customer.country != profile["country"]:
+                customer.country = profile["country"]
+            digest = customer.contact_history_digest or ""
+            entry = f"{thread.thread_id}: {message[:80]}"
+            if entry not in digest:
+                customer.contact_history_digest = (digest + " | " + entry).strip(" |")[-2000:]
+        if thread.thread_id not in customer.linked_threads:
+            customer.linked_threads.append(thread.thread_id)
+        customer.last_seen_at = datetime.now(timezone.utc)
+        self.store.upsert_customer(customer)
 
     # ------------------------------------------------------- 2) 来信接入
     def ingest(self, *, buyer_id: str, message: str, language: Language = Language.EN,
@@ -124,6 +172,28 @@ class Supervisor:
         profile = {"company": company or (customer.company if customer else buyer_id),
                    "country": country or (customer.country if customer else "")}
 
+        # 客户档案跨线程共享（PRD 8.3）：登记本线程、累积历史要点
+        self._sync_customer_profile(buyer_id, profile, thread, message)
+
+        # Prompt 注入检测（PRD 8.9）：买家消息是数据，不是指令
+        injection = detect_injection(message)
+        if injection:
+            thread.status_flags = list(thread.status_flags) + ["injection_detected"]
+            thread.version += 1
+            self.store.save_thread(thread)
+            self._log(thread.thread_id, EventType.HUMAN_TAKEOVER,
+                      {"reason": "命中 Prompt 注入特征", "pattern": injection})
+            self._audit("system", "security.injection_blocked", thread.thread_id,
+                        {"pattern": injection})
+            gates = evaluate_gates(thread, None, self.low_confidence_threshold, self.amount_threshold)
+            return IngestResult(thread_id=thread.thread_id, status="blocked",
+                                message="命中 Prompt 注入特征：已阻断并转人工，未生成任何回复",
+                                gates=gates, blocking_gates=blocking_gates(gates),
+                                risk_level=RiskLevel.HIGH,
+                                evidence=[{"注入特征": injection}],
+                                intent_labels=intents,
+                                next_action="人工判定（安全记录已留痕）")
+
         # 路由到人工（投诉）
         if decision["target"] == "human":
             thread.status_flags = list(thread.status_flags) + ["complaint"]
@@ -151,7 +221,8 @@ class Supervisor:
 
         # 风控优先：命中高风险 → 不让 Inquiry 产生任何对外内容
         if risk_result is not None and risk_result.risk_level is RiskLevel.HIGH:
-            thread.status_flags = list(thread.status_flags) + ["sanction_hit"]
+            thread.status_flags = list(thread.status_flags) + ["sanction_hit",
+                                                             f"risk_{risk_result.risk_level.value}"]
             thread.version += 1
             self.store.save_thread(thread)
             self._log(thread.thread_id, EventType.DRAFT_GENERATED,
@@ -174,7 +245,8 @@ class Supervisor:
             try:
                 build_handoff(
                     from_agent=sentinel.agent_id, to_agent="inquiry.reply",
-                    reason="风控通过，转询盘应答",
+                    thread_id=thread.thread_id, buyer_id=thread.buyer_id,
+                    handoff_reason="风控通过，转询盘应答",
                     buyer_profile_digest=f"{profile['company']}（{profile['country']}）",
                     committed_items=thread.committed_items,
                     open_questions=thread.open_questions,
@@ -227,6 +299,8 @@ class Supervisor:
         if blocking:
             thread.status_flags = list(thread.status_flags) + ["awaiting_signoff"]
         thread.intent_labels = result.intent_labels or thread.intent_labels
+        risk_tag = f"risk_{risk_result.risk_level.value}" if risk_result else "risk_low"
+        thread.status_flags = [f for f in thread.status_flags if not f.startswith("risk_")] + [risk_tag]
         thread.version += 1
         self.store.save_thread(thread)
 
@@ -240,6 +314,27 @@ class Supervisor:
             handoff_ok=handoff_ok, handoff_missing=handoff_missing,
             next_action=result.next_action,
         )
+
+    def signoff_view(self, thread_id: str) -> Dict[str, Any]:
+        """签核界面需要的 5 类要素（FR-HUM-05）：草稿全文、引用证据、风险项、承诺台账、置信度。"""
+        thread = self.store.get_thread(thread_id)
+        if thread is None:
+            return {}
+        draft = self.get_draft(thread_id)
+        gates = evaluate_gates(thread, draft, self.low_confidence_threshold, self.amount_threshold)
+        return {
+            "thread_id": thread_id,
+            "draft_body": draft.body if draft else None,
+            "citations": [c.model_dump(mode="json") for c in draft.citations] if draft else [],
+            "risk_items": [{"gate_id": g.gate_id.value, "title": g.title, "hit": g.hit,
+                            "must": g.must, "desc": g.desc}
+                           for g in gates if g.hit],
+            "committed_items": [{"kind": c.kind, "value": c.value} for c in thread.committed_items],
+            "open_questions": [{"text": q.text, "raised_by": q.raised_by} for q in thread.open_questions],
+            "confidence": draft.confidence if draft else 0.0,
+            "gates": [g.model_dump(mode="json") for g in gates],
+            "status_flags": thread.status_flags,
+        }
 
     def get_draft(self, thread_id: str) -> Optional[Draft]:
         """取该线程最近一次的草稿。"""
@@ -258,7 +353,7 @@ class Supervisor:
         if action not in ("approve", "modify", "reject", "transfer"):
             return {"ok": False, "code": "bad_action", "message": "不支持的签核动作"}
 
-        if not self.tokens.consume(token, thread_id, draft_id):
+        if not self.tokens.consume(token, thread_id, draft_id, action="sign_off"):
             self._log(thread_id, EventType.WRITE_REJECTED,
                       {"action": action, "reason": "闸门令牌无效/已使用/不匹配"}, actor=Actor.HUMAN)
             return {"ok": False, "code": "gate_token_invalid",
@@ -279,11 +374,21 @@ class Supervisor:
                       {"draft_id": draft_id, "action": action, "actor": actor}, actor=Actor.HUMAN)
             self._audit(actor, "signed_off_modified", thread_id, {"draft_id": draft_id})
         elif action == "reject":
-            thread.status_flags = list(thread.status_flags) + ["rejected"]
+            # 驳回必须带原因，并归类回灌给 Agent（FR-HUM-06 / FR-HUM-07）
+            try:
+                reason_class = classify_reject_reason(reason)
+            except ValueError as e:
+                return {"ok": False, "code": "reject_reason_required", "message": str(e)}
+            thread.status_flags = list(thread.status_flags) + ["rejected", f"reject:{reason_class}"]
             self._log(thread_id, EventType.SIGNED_OFF,
                       {"draft_id": draft_id, "action": action, "actor": actor,
-                       "reason": reason}, actor=Actor.HUMAN)
-            self._audit(actor, "signed_off_rejected", thread_id, {"reason": reason})
+                       "reason": reason, "reason_class": reason_class}, actor=Actor.HUMAN)
+            self._audit(actor, "signed_off_rejected", thread_id,
+                        {"reason": reason, "reason_class": reason_class})
+            # 回灌：把驳回原因写进线程上下文，下一轮草稿能看到
+            thread.pending_action = {"kind": "rejected", "reason": reason,
+                                     "reason_class": reason_class,
+                                     "at": datetime.now(timezone.utc).isoformat()}
         else:  # transfer
             thread.status_flags = list(thread.status_flags) + ["human_takeover"]
             self._log(thread_id, EventType.HUMAN_TAKEOVER,
@@ -307,7 +412,7 @@ class Supervisor:
                         {"reason": "价格未签核", "draft_id": draft_id})
             return {"ok": False, "code": "not_signed_off",
                     "message": "价格/交期尚未签核，禁止外发"}
-        if not self.tokens.consume(token, thread_id, draft_id):
+        if not self.tokens.consume(token, thread_id, draft_id, action="send_draft"):
             self._log(thread_id, EventType.WRITE_REJECTED,
                       {"action": "send", "reason": "闸门令牌无效/已使用"}, actor=Actor.HUMAN)
             return {"ok": False, "code": "gate_token_invalid",
@@ -340,27 +445,48 @@ class Supervisor:
 
     # ------------------------------------------------------- 6) SLA 守护
     def sla_scan(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-        """扫描超时线程：超时的标记并升级（写事件 + 审计）。"""
+        """扫描超时线程：标记 + **分级升级**（业务员 → 经理），写事件与审计。"""
         now = now or datetime.now(timezone.utc)
         overdue: List[Dict[str, Any]] = []
         for t in self.store.list_threads():
             for d in t.deadlines:
-                if d.due_at < now and "sla_overdue" not in t.status_flags:
-                    t.status_flags = list(t.status_flags) + ["sla_overdue"]
-                    t.version += 1
-                    self.store.save_thread(t)
-                    self._log(t.thread_id, EventType.STAGE_CHANGED,
-                              {"sla_overdue": d.label, "due_at": d.due_at.isoformat()},
-                              actor=Actor.SYSTEM)
-                    self._audit("system", "sla.escalated", t.thread_id, {"label": d.label})
-                    overdue.append({"thread_id": t.thread_id, "label": d.label,
-                                    "due_at": d.due_at.isoformat(), "stage": t.stage.value})
+                if d.due_at >= now:
+                    continue
+                flags = list(t.status_flags)
+                if "sla_overdue" not in flags:
+                    flags.append("sla_overdue")
+                # 分级升级：第一次扫描升到业务员，已升级过的再升一级到经理
+                level = "业务员"
+                if "sla_escalated_manager" in flags:
+                    level = "经理"
+                elif "sla_escalated_user" in flags:
+                    flags.append("sla_escalated_manager")
+                    level = "经理"
+                else:
+                    flags.append("sla_escalated_user")
+                t.status_flags = flags
+                t.version += 1
+                self.store.save_thread(t)
+                self._log(t.thread_id, EventType.STAGE_CHANGED,
+                          {"sla_overdue": d.label, "due_at": d.due_at.isoformat(),
+                           "escalated_to": level}, actor=Actor.SYSTEM)
+                self._audit("system", "sla.escalated", t.thread_id,
+                            {"label": d.label, "escalated_to": level})
+                overdue.append({"thread_id": t.thread_id, "label": d.label,
+                                "due_at": d.due_at.isoformat(), "stage": t.stage.value,
+                                "escalated_to": level})
         return overdue
 
     # ------------------------------------------------------- 内部
     def _next_thread_id(self) -> str:
-        n = len(self.store.list_threads()) + 1
-        return f"T-{2000 + n}"
+        """生成唯一线程号。
+
+        原来用 `len(list_threads()) + 1` 推算 —— 并发接入时两个线程会算出同一个号
+        （UNIQUE constraint failed）。这里改成进程内自增 + 锁，保证唯一。
+        """
+        with self._id_lock:
+            self._id_counter += 1
+            return f"T-{self._id_base + self._id_counter}"
 
 
 def draft_id(thread_id: str) -> str:

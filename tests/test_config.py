@@ -8,6 +8,7 @@
    相对路径会让两个进程共用同一个库文件。
 """
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -43,10 +44,23 @@ def test_db_path_is_absolute_under_project_root():
 
 
 def test_each_worktree_gets_its_own_database_file():
-    """两个 worktree 的库文件必须不是同一个。"""
-    a = Config.load(project_root=ROOT)
-    b = Config.load(project_root=ROOT.parent / "agent-a")
-    assert a.db_path != b.db_path
+    """两个 worktree 的库文件必须不是同一个。
+
+    ⚠ 不能用 `ROOT.parent / "agent-a"` 这种写法：它只在"从主仓库跑"时成立；
+    在 worktree 里跑时 ROOT.parent/"agent-a" 恰好等于 ROOT 自己，测试会自相矛盾地失败。
+    这里改成与运行位置无关的写法：从 git common-dir 反推主仓库根，再与当前 worktree 比较。
+    """
+    import subprocess
+
+    git = shutil.which("git") or r"C:\Users\DELL\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\cmd\git.exe"
+    common = subprocess.run(
+        [git, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=str(ROOT), capture_output=True, text=True)
+    repo_root = Path(common.stdout.strip()).parent if common.returncode == 0 else ROOT.parent
+    a = Config.load(project_root=repo_root)
+    b = Config.load(project_root=ROOT)
+    assert a.db_path != b.db_path, f"主仓库与 worktree 共用同一个库文件：{a.db_path}"
+    assert str(ROOT) in b.db_path, "库路径必须按项目根解析，而不是当前工作目录"
 
 
 def test_absolute_db_path_is_left_alone():

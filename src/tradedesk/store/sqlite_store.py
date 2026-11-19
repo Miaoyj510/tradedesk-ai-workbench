@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS gate_tokens (
     token       TEXT PRIMARY KEY,
     thread_id   TEXT NOT NULL,
     draft_id    TEXT NOT NULL,
+      action      TEXT NOT NULL DEFAULT '',
     gates       TEXT NOT NULL,
     issued_at   TEXT NOT NULL,
     expires_at  TEXT NOT NULL,
@@ -121,6 +122,11 @@ class SqliteStateStore:
     def _new_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        # autocommit：默认隔离级别下，一次 SELECT 会开着一个读事务直到 commit；
+        # 之后同一连接想写（"升级事务"）若此时别的连接正在写，SQLite 会**立刻**
+        # 返回 SQLITE_BUSY（busy_timeout 对这种死锁升级无效）。
+        # 改成 autocommit 后每条语句自成一个事务，跨线程并发写只靠 busy_timeout 排队。
+        conn.isolation_level = None
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
@@ -144,6 +150,10 @@ class SqliteStateStore:
     # ---------- 基础设施 ----------
     def init_schema(self) -> None:
         self._conn.executescript(DDL)
+        # 轻量迁移：老库补列（CREATE TABLE IF NOT EXISTS 不会给已存在的表加列）
+        _cols = {r[1] for r in self._conn.execute("PRAGMA table_info(gate_tokens)")}
+        if "action" not in _cols:
+            self._conn.execute("ALTER TABLE gate_tokens ADD COLUMN action TEXT NOT NULL DEFAULT ''")
         cur = self._conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'")
         row = cur.fetchone()
         if row is None:
@@ -341,10 +351,10 @@ class SqliteStateStore:
     def issue_gate_token(self, token: GateToken) -> None:
         with self._write_lock:
             self._conn.execute(
-                "INSERT INTO gate_tokens(token, thread_id, draft_id, gates, issued_at, expires_at, consumed_at) "
-                "VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO gate_tokens(token, thread_id, draft_id, action, gates, issued_at, expires_at, consumed_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
                 (
-                    token.token, token.thread_id, token.draft_id,
+                    token.token, token.thread_id, token.draft_id, token.action,
                     _dumps([g.value for g in token.gates]),
                     token.issued_at.isoformat(), token.expires_at.isoformat(),
                     token.consumed_at.isoformat() if token.consumed_at else None,
@@ -356,8 +366,10 @@ class SqliteStateStore:
         row = self._conn.execute("SELECT * FROM gate_tokens WHERE token=?", (token_id,)).fetchone()
         if not row:
             return None
+        keys = row.keys()
         return GateToken(
             token=row["token"], thread_id=row["thread_id"], draft_id=row["draft_id"],
+            action=row["action"] if "action" in keys else "",
             gates=json.loads(row["gates"]),
             issued_at=datetime.fromisoformat(row["issued_at"]),
             expires_at=datetime.fromisoformat(row["expires_at"]),

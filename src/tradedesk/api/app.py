@@ -31,9 +31,14 @@ class SignOffBody(BaseModel):
     action: str = Field(pattern="^(approve|modify|reject|transfer)$")
     reason: str = ""
 
+    def check(self) -> None:
+        if self.action == "reject" and not self.reason.strip():
+            raise ValueError("驳回必须带原因（FR-HUM-06）")
+
 
 class GateTokenBody(BaseModel):
     draft_id: str
+    action: str = "sign_off"        # sign_off / send_draft / advance_stage
 
 
 class SendBody(BaseModel):
@@ -111,10 +116,18 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
     # ------------------------------------------------------------ 线程
     @app.get("/threads")
     def list_threads(stage: Optional[str] = None, buyer_id: Optional[str] = None,
-                     lang: Optional[str] = None) -> List[Dict[str, Any]]:
+                     lang: Optional[str] = None, risk: Optional[str] = None,
+                     waiting_minutes: Optional[int] = None) -> List[Dict[str, Any]]:
+        """线程看板：按 阶段 / 语种 / 风险等级 / 等待人审时长 四类筛选（FR-ORC-10）。"""
         items = app.state.ctx.store.list_threads(stage=stage, buyer_id=buyer_id)
         if lang:
             items = [t for t in items if t.language.value == lang]
+        if risk:
+            items = [t for t in items if f"risk_{risk}" in t.status_flags]
+        if waiting_minutes is not None:
+            now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+            items = [t for t in items
+                     if (now - t.last_activity_at).total_seconds() / 60 >= waiting_minutes]
         return [_thread_view(t) for t in items]
 
     @app.get("/threads/{thread_id}")
@@ -147,11 +160,26 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
         )
         return _ingest_view(result)
 
+    # ------------------------------------------------------------ 签核详情（5 要素）
+    @app.get("/threads/{thread_id}/signoff-view")
+    def signoff_view(thread_id: str, sup: Supervisor = Depends(supervisor)) -> Dict[str, Any]:
+        """签核界面需要呈现的 5 类要素（FR-HUM-05）。"""
+        view = sup.signoff_view(thread_id)
+        if not view:
+            raise HTTPException(status_code=404,
+                                detail={"code": "not_found", "message": "线程不存在"})
+        return view
+
     # ------------------------------------------------------------ 人工签核
     @app.post("/threads/{thread_id}/signoff")
     def sign_off(thread_id: str, body: SignOffBody,
                  token: str = Depends(require_gate_token),
                  sup: Supervisor = Depends(supervisor)) -> Dict[str, Any]:
+        try:
+            body.check()
+        except ValueError as e:
+            raise HTTPException(status_code=422,
+                                detail={"code": "reject_reason_required", "message": str(e)})
         out = sup.sign_off(thread_id=thread_id, draft_id=body.draft_id, token=token,
                            action=body.action, reason=body.reason)
         if not out.get("ok"):
@@ -207,7 +235,7 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
                                                        app.state.ctx.config.low_confidence_threshold,
                                                        app.state.ctx.config.amount_threshold_usd)
                      if g.hit]
-        token = app.state.ctx.tokens.issue(thread_id, body.draft_id, gates)
+        token = app.state.ctx.tokens.issue(thread_id, body.draft_id, gates, action=body.action)
         return {"token": token.token, "expires_at": token.expires_at.isoformat(),
                 "draft_id": body.draft_id}
 
@@ -253,4 +281,5 @@ def _ingest_view(r: IngestResult) -> Dict[str, Any]:
     }
 
 
-app = None  # 由 uvicorn 工厂创建：uvicorn tradedesk.api.app:create_app --factory
+# 模块级 app：Dockerfile 的 CMD 与 HEALTHCHECK 都指向 tradedesk.api.app:app
+app = create_app()

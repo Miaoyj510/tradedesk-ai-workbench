@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Handoff 契约（PRD 8.4）：Agent 之间交接的 13 个必填字段。
+"""Handoff 契约（PRD 8.4）：Agent 之间交接的 15 个必填字段。
 
 为什么要有契约
 --------------
@@ -18,7 +18,9 @@ from ..domain.models import CommittedItem, Deadline, Handoff, OpenQuestion
 REQUIRED_FIELDS: List[str] = [
     "from_agent",
     "to_agent",
-    "reason",
+    "thread_id",
+    "buyer_id",
+    "handoff_reason",
     "buyer_profile_digest",
     "committed_items",
     "open_questions",
@@ -65,7 +67,9 @@ def build_handoff(
     *,
     from_agent: str,
     to_agent: str,
-    reason: str,
+    thread_id: str,
+    buyer_id: str,
+    handoff_reason: str,
     buyer_profile_digest: str,
     committed_items: List[CommittedItem],
     open_questions: List[OpenQuestion],
@@ -81,7 +85,9 @@ def build_handoff(
     handoff = Handoff(
         from_agent=from_agent,
         to_agent=to_agent,
-        reason=reason,
+        thread_id=thread_id,
+        buyer_id=buyer_id,
+        handoff_reason=handoff_reason,
         buyer_profile_digest=buyer_profile_digest,
         committed_items=list(committed_items),
         open_questions=list(open_questions),

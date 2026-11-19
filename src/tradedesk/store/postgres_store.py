@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS gate_tokens (
     token       TEXT PRIMARY KEY,
     thread_id   TEXT NOT NULL,
     draft_id    TEXT NOT NULL,
+    action      TEXT NOT NULL DEFAULT '',
     gates       JSONB NOT NULL,
     issued_at   TIMESTAMPTZ NOT NULL,
     expires_at  TIMESTAMPTZ NOT NULL,
@@ -118,7 +119,8 @@ class PostgresStateStore:
         """当前线程的连接（没有就建一条）。"""
         c = getattr(self._local, "conn", None)
         if c is None or c.closed:
-            c = self._psycopg.connect(self.dsn)
+            # connect_timeout：容器没起时立刻失败，不干等默认长超时
+            c = self._psycopg.connect(self.dsn, connect_timeout=5)
             c.autocommit = True
             self._local.conn = c
             with self._conns_lock:
@@ -129,6 +131,11 @@ class PostgresStateStore:
     def init_schema(self) -> None:
         with self.conn.cursor() as cur:
             cur.execute(DDL)
+            # 轻量迁移：老库补列
+            cur.execute("SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name='gate_tokens' AND column_name='action'")
+            if cur.fetchone() is None:
+                cur.execute("ALTER TABLE gate_tokens ADD COLUMN action TEXT NOT NULL DEFAULT ''")
             cur.execute(
                 "INSERT INTO schema_meta(key, value) VALUES('schema_version', '1') "
                 "ON CONFLICT (key) DO NOTHING"
@@ -325,10 +332,10 @@ class PostgresStateStore:
     def issue_gate_token(self, token: GateToken) -> None:
         with self.conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO gate_tokens(token, thread_id, draft_id, gates, issued_at, expires_at, consumed_at) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                "INSERT INTO gate_tokens(token, thread_id, draft_id, action, gates, issued_at, expires_at, consumed_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                 (
-                    token.token, token.thread_id, token.draft_id,
+                    token.token, token.thread_id, token.draft_id, token.action,
                     json.dumps([g.value for g in token.gates]), token.issued_at, token.expires_at,
                     token.consumed_at,
                 ),
@@ -337,14 +344,14 @@ class PostgresStateStore:
     def get_gate_token(self, token_id: str) -> Optional[GateToken]:
         with self.conn.cursor() as cur:
             cur.execute(
-                "SELECT token, thread_id, draft_id, gates, issued_at, expires_at, consumed_at "
+                "SELECT token, thread_id, draft_id, action, gates, issued_at, expires_at, consumed_at "
                 "FROM gate_tokens WHERE token=%s", (token_id,)
             )
             row = cur.fetchone()
         if not row:
             return None
-        return GateToken(token=row[0], thread_id=row[1], draft_id=row[2], gates=row[3],
-                         issued_at=row[4], expires_at=row[5], consumed_at=row[6])
+        return GateToken(token=row[0], thread_id=row[1], draft_id=row[2], action=row[3], gates=row[4],
+                         issued_at=row[5], expires_at=row[6], consumed_at=row[7])
 
     def consume_gate_token(self, token_id: str, thread_id: str, draft_id: str) -> bool:
         """一次性消费：条件更新（consumed_at IS NULL）保证并发下也只成功一次。"""

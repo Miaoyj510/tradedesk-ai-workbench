@@ -30,4 +30,4 @@ ENV LANG=C.UTF-8 \
 HEALTHCHECK --interval=15s --timeout=3s --start-period=20s --retries=5 \
   CMD curl -fsS http://127.0.0.1:8080/health || exit 1
 
-CMD ["uvicorn", "tradedesk.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "tradedesk.api.app:app", "--host", "0.0.0.0", "--port", "8080"]

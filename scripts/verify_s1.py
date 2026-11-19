@@ -380,8 +380,23 @@ def _run_backend(backend: str, args, all_results) -> int:
         print("\n" + "=" * 70)
         print("后端：PostgreSQL 16（Docker 容器，本地真实依赖）")
         print(f"DSN：{args.dsn}")
-        store = PostgresStateStore(args.dsn)
-        store.reset()
+        try:
+            store = PostgresStateStore(args.dsn)
+        except Exception as e:
+            # 容器没起 / Docker 引擎没跑 → 跳过这一段，但**必须说清楚**，不能假装通过
+            print(f"  [SKIP] PostgreSQL 不可用，跳过该后端：{type(e).__name__}: {str(e)[:110]}")
+            print("         启动依赖：& $dev up（需要 Docker Desktop 在运行）")
+            store = None
+        if store is not None:
+            store.reset()
+
+    if store is None:
+        passed = sum(1 for r in RESULTS if r["ok"])
+        total = len(RESULTS)
+        print("\n" + "-" * 66)
+        print(f"[sqlite] 结果：{passed}/{total} 项通过（PostgreSQL 后端已跳过：容器未启动）")
+        print("-" * 66)
+        return 0 if passed == total else 1
 
     try:
         scenario_1_seed(store)
