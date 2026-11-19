@@ -7,7 +7,8 @@
 #   & "D:\桌面\AIagent_project\外贸项目\dev.ps1" down      # 停容器
 param(
   [Parameter(Position = 0)][string]$Command = "help",
-  [string]$Backend = "both"
+  [string]$Backend = "both",
+  [string]$Dsn = ""            # 指定数据库（两个 agent 用不同库，避免互相清表）
 )
 
 # ⚠ 本文件必须保存为 **UTF-8 with BOM**：Windows PowerShell 5.1 会把无 BOM 的脚本按 GBK 读取，
@@ -28,8 +29,15 @@ function Get-DockerExe {
 }
 
 function Get-PythonExe {
-  $venv = Join-Path $Root ".venv\Scripts\python.exe"
-  if (Test-Path -LiteralPath $venv) { return $venv }
+  # worktree 里没有自己的 .venv，向上找主仓库的（worktree 位于 <repo>\.worktrees\<name>）
+  $dir = $Root
+  for ($i = 0; $i -lt 3; $i++) {
+    $venv = Join-Path $dir ".venv\Scripts\python.exe"
+    if (Test-Path -LiteralPath $venv) { return $venv }
+    $parent = Split-Path -Parent $dir
+    if (-not $parent -or $parent -eq $dir) { break }
+    $dir = $parent
+  }
   $fallback = "C:\Users\DELL\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
   if (Test-Path -LiteralPath $fallback) {
     Write-Host "[提示] 项目虚拟环境不存在，先创建 .venv" -ForegroundColor Yellow
@@ -56,7 +64,8 @@ switch ($Command.ToLower()) {
   "verify" {
     $py = Get-PythonExe
     Write-Host "[verify] 运行 S1 验证（后端：$Backend）" -ForegroundColor Cyan
-    & $py (Join-Path $Root "scripts\verify_s1.py") --backend $Backend
+    if ($Dsn) { & $py (Join-Path $Root "scripts\verify_s1.py") --backend $Backend --dsn $Dsn }
+    else { & $py (Join-Path $Root "scripts\verify_s1.py") --backend $Backend }
     exit $LASTEXITCODE
   }
   "test" {
@@ -74,6 +83,8 @@ switch ($Command.ToLower()) {
       Select-Object LocalAddress, LocalPort | Format-Table -AutoSize
   }
   "check" {
+    $DsnArgs = @()
+    if ($Dsn) { $DsnArgs = @("--dsn", $Dsn) }
     Write-Host "==============================================" -ForegroundColor Cyan
     Write-Host "[check 1/3] Python 语法检查（src / tests / scripts）" -ForegroundColor Cyan
     $py = Get-PythonExe
@@ -82,7 +93,8 @@ switch ($Command.ToLower()) {
     Write-Host "  ✓ 语法检查通过" -ForegroundColor Green
 
     Write-Host "[check 2/3] S1 验证（SQLite + PostgreSQL 双后端）" -ForegroundColor Cyan
-    & $py (Join-Path $Root "scripts\verify_s1.py") --backend both
+    if ($DsnArgs.Count -gt 0) { & $py (Join-Path $Root "scripts\verify_s1.py") --backend both @DsnArgs }
+    else { & $py (Join-Path $Root "scripts\verify_s1.py") --backend both }
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 验证未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ 验证通过" -ForegroundColor Green
 
