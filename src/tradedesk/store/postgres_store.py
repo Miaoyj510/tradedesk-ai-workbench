@@ -16,6 +16,7 @@ pgvector 扩展在 S4 接入：镜像见 docker/pgvector/Dockerfile。
 from __future__ import annotations
 
 import json
+import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,6 +30,12 @@ from ..domain.models import (
 )
 
 DEFAULT_DSN = "postgresql://tradedesk:tradedesk_local_dev@127.0.0.1:5433/tradedesk"
+
+# 事务级咨询锁：审计链与事件序号都是"读最后一条 → 再插一条"，
+# 不加锁在并发下会算出同一个 seq / 同一个 prev_hash，链就断了。
+# pg_advisory_xact_lock 在事务结束时自动释放，异常回滚也不会留死锁。
+LOCK_AUDIT = 811_001
+LOCK_EVENT = 811_002
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -87,17 +94,36 @@ def _json_default(obj: Any) -> str:
 
 
 class PostgresStateStore:
-    """PostgreSQL 状态存储。接口与 SqliteStateStore 一致。"""
+    """PostgreSQL 状态存储。接口与 SqliteStateStore 一致。
+
+    **每个线程一条连接**：psycopg 的 Connection 不是线程安全的 ——
+    同一个连接被多个线程同时用，事务状态会互相踩
+    （实测报 "transaction commit at the wrong nesting level"），
+    审计链在这种并发下会断。HTTP 层是多线程的，所以这里按线程隔离连接。
+    """
 
     def __init__(self, dsn: str = DEFAULT_DSN, create: bool = True) -> None:
         import psycopg  # 延迟导入：没装驱动也能用 SQLite 后端跑
 
         self.dsn = dsn
         self._psycopg = psycopg
-        self.conn = psycopg.connect(dsn)
-        self.conn.autocommit = True
+        self._local = threading.local()
+        self._conns: List[Any] = []
+        self._conns_lock = threading.Lock()
         if create:
             self.init_schema()
+
+    @property
+    def conn(self):
+        """当前线程的连接（没有就建一条）。"""
+        c = getattr(self._local, "conn", None)
+        if c is None or c.closed:
+            c = self._psycopg.connect(self.dsn)
+            c.autocommit = True
+            self._local.conn = c
+            with self._conns_lock:
+                self._conns.append(c)
+        return c
 
     # ---------- 基础设施 ----------
     def init_schema(self) -> None:
@@ -109,7 +135,15 @@ class PostgresStateStore:
             )
 
     def close(self) -> None:
-        self.conn.close()
+        """关闭所有线程的连接（不只是当前线程那条）。"""
+        with self._conns_lock:
+            conns, self._conns = self._conns, []
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+        self._local = threading.local()
 
     def reset(self) -> None:
         """清空业务表（验证脚本可重复运行的前提）。"""
@@ -205,20 +239,23 @@ class PostgresStateStore:
 
     # ---------- 事件日志 ----------
     def append_event(self, event: ThreadEvent) -> ThreadEvent:
-        with self.conn.cursor() as cur:
-            cur.execute(
-                "SELECT COALESCE(MAX(seq),0) FROM thread_events WHERE thread_id=%s", (event.thread_id,)
-            )
-            event.seq = cur.fetchone()[0] + 1
-            cur.execute(
-                "INSERT INTO thread_events(thread_id, seq, event_type, actor, payload, ts) "
-                "VALUES(%s,%s,%s,%s,%s,%s)",
-                (
-                    event.thread_id, event.seq, event.event_type.value, event.actor.value,
-                    json.dumps(event.payload, ensure_ascii=False, default=_json_default),
-                    event.ts,
-                ),
-            )
+        # 取号 + 插入必须在同一事务里并加锁，否则并发写入会拿到同一个 seq。
+        with self.conn.transaction():
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_EVENT,))
+                cur.execute(
+                    "SELECT COALESCE(MAX(seq),0) FROM thread_events WHERE thread_id=%s", (event.thread_id,)
+                )
+                event.seq = cur.fetchone()[0] + 1
+                cur.execute(
+                    "INSERT INTO thread_events(thread_id, seq, event_type, actor, payload, ts) "
+                    "VALUES(%s,%s,%s,%s,%s,%s)",
+                    (
+                        event.thread_id, event.seq, event.event_type.value, event.actor.value,
+                        json.dumps(event.payload, ensure_ascii=False, default=_json_default),
+                        event.ts,
+                    ),
+                )
         return event
 
     def list_events(self, thread_id: str) -> List[ThreadEvent]:
@@ -236,24 +273,29 @@ class PostgresStateStore:
 
     # ---------- 审计（哈希链） ----------
     def append_audit(self, actor: str, action: str, target: str, payload: Dict[str, Any]) -> AuditEntry:
-        with self.conn.cursor() as cur:
-            cur.execute("SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1")
-            row = cur.fetchone()
-            prev_hash = row[1] if row else ""
-            seq = (row[0] if row else 0) + 1
-            entry = AuditEntry(seq=seq, actor=actor, action=action, target=target, payload=payload,
-                               ts=datetime.now(timezone.utc), prev_hash=prev_hash)
-            entry.hash = audit_hash(entry.seq, entry.actor, entry.action, entry.target,
-                                    entry.payload, entry.ts, entry.prev_hash)
-            cur.execute(
-                "INSERT INTO audit_log(seq, actor, action, target, payload, ts, prev_hash, hash) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
-                (
-                    entry.seq, entry.actor, entry.action, entry.target,
-                    json.dumps(entry.payload, ensure_ascii=False, default=_json_default),
-                    entry.ts, entry.prev_hash, entry.hash,
-                ),
-            )
+        # 哈希链要求"每条的 prev_hash 正好是上一条的 hash"。
+        # 取 prev + 算 seq + 插入必须在同一事务内加锁完成，
+        # 否则两个并发写入会算出同一个 prev_hash，链从那一条起就断了。
+        with self.conn.transaction():
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (LOCK_AUDIT,))
+                cur.execute("SELECT seq, hash FROM audit_log ORDER BY seq DESC LIMIT 1")
+                row = cur.fetchone()
+                prev_hash = row[1] if row else ""
+                seq = (row[0] if row else 0) + 1
+                entry = AuditEntry(seq=seq, actor=actor, action=action, target=target, payload=payload,
+                                   ts=datetime.now(timezone.utc), prev_hash=prev_hash)
+                entry.hash = audit_hash(entry.seq, entry.actor, entry.action, entry.target,
+                                        entry.payload, entry.ts, entry.prev_hash)
+                cur.execute(
+                    "INSERT INTO audit_log(seq, actor, action, target, payload, ts, prev_hash, hash) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (
+                        entry.seq, entry.actor, entry.action, entry.target,
+                        json.dumps(entry.payload, ensure_ascii=False, default=_json_default),
+                        entry.ts, entry.prev_hash, entry.hash,
+                    ),
+                )
         return entry
 
     def list_audit(self) -> List[AuditEntry]:
