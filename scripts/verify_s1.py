@@ -154,6 +154,18 @@ def scenario_2_transitions(store: SqliteStateStore) -> None:
     check("阶段迁移写入事件日志", len(store.list_events("T-9001")) == 3,
           f"事件数 {len(store.list_events('T-9001'))}")
 
+    # 阶段进入时间：必须是"迁移发生的那一刻"，不是抄线程的最后活动时间。
+    # 阶段停留时长、SLA 守护、看板的"等待人审时长"都建在这个字段上。
+    stamp = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    probe = build_thread("T-9001B", "BY-BR-01", Language.ES, message_hash="sha-9001b")
+    probe.last_activity_at = stamp - timedelta(days=7)
+    store.create_thread(probe)
+    moved = apply_transition(store.get_thread("T-9001B"), "SAMPLING", at=stamp)
+    store.save_thread(moved)
+    got = store.get_thread("T-9001B")
+    check("阶段进入时间 = 迁移时点", got.stage_entered_at == stamp, str(got.stage_entered_at))
+    check("最后活动时间随迁移推进", got.last_activity_at == stamp, str(got.last_activity_at))
+
     ok, reason = check_transition(cur, "ORDERED")
     check("缺合同版本时 QUOTING→ORDERED 被拦截", ok is False, reason)
 

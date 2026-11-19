@@ -3,13 +3,14 @@
 
 设计要点
 1. 状态迁移是**纯函数**：`apply_transition` 不碰 IO，便于穷举测试与回放。
-2. 前置条件（guard）写在迁移表里，而不是散落在业务代码：进入 ORDERED 必须有合同版本；
-   外发价格必须 price_signed_off。
+2. 前置条件（guard）写在迁移表里，而不是散落在业务代码：进入 ORDERED 必须有合同版本。
+   价格 / 交期的签核不在这里 —— 那是"外发草稿"路径上的人审闸门（GATE-01 / GATE-02）。
 3. 非法迁移不抛异常给上层业务，而是返回 `(allowed, reason)`，由调用方决定"拒绝并留痕"。
 """
 from __future__ import annotations
 
-from typing import Dict, FrozenSet, List, Tuple
+from datetime import datetime, timezone
+from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from .enums import Stage
 from .models import ThreadState
@@ -30,19 +31,21 @@ TERMINAL_STAGES: FrozenSet[Stage] = frozenset({Stage.CLOSED, Stage.LOST})
 
 # ---- 迁移前置条件 ----
 # key: (from, to) -> (说明, 判定函数)
-Guard = Tuple[str, str]  # (说明, 判定字段名)
+Guard = Tuple[str, Callable[[ThreadState], bool]]
 
 
 def _has_contract(thread: ThreadState) -> bool:
     return bool(thread.contract_version)
 
 
-def _price_signed_off(thread: ThreadState) -> bool:
-    return thread.price_signed_off
-
-
-GUARDS: Dict[Tuple[Stage, Stage], Tuple[str, bool]] = {
-    (Stage.QUOTING, Stage.ORDERED): ("进入订单前必须确认合同条款（contract_version 非空）", False),
+# PRD 4.3：ORDERED 的进入条件是"双方确认条款（合同人工确认）"，所以这里的 guard
+# 只有合同一条。价格 / 交期的签核**不在阶段迁移上** —— 那是"外发草稿"路径上的
+# 人审闸门（GATE-01 / GATE-02，见 runtime/gates.py）。
+GUARDS: Dict[Tuple[Stage, Stage], Guard] = {
+    (Stage.QUOTING, Stage.ORDERED): (
+        "进入订单前必须确认合同条款（contract_version 非空）",
+        _has_contract,
+    ),
 }
 
 
@@ -77,21 +80,32 @@ def check_transition(thread: ThreadState, to_stage: Stage) -> Tuple[bool, str]:
     guard = GUARDS.get((thread.stage, to_stage))
     if guard:
         desc, checker = guard
-        ok = _has_contract(thread) if checker is False else checker(thread)
-        if not ok:
+        if not checker(thread):
             return False, desc
     return True, "ok"
 
 
-def apply_transition(thread: ThreadState, to_stage: Stage) -> ThreadState:
-    """纯函数推进：返回新的 ThreadState；非法时抛 TransitionRejected。"""
+def apply_transition(thread: ThreadState, to_stage: Stage,
+                     at: Optional[datetime] = None) -> ThreadState:
+    """纯函数推进：返回新的 ThreadState；非法时抛 TransitionRejected。
+
+    `at` 是本次迁移发生的时间戳，不传就用当前时间。做确定性回放时传历史时间戳，
+    结果就可复现 —— 这是它"不读时钟、也不碰 IO"的关键。
+
+    两个时间戳的分工（PRD 8.3）：
+    - `stage_entered_at` = 进入当前阶段的时间 → 用来算"阶段停留时长"
+    - `last_activity_at` = 最近一次活动时间 → 用来算"跨天断点续传"
+    迁移本身就是一次活动，两个一起推进。
+    """
     to_stage = Stage(to_stage)
     ok, reason = check_transition(thread, to_stage)
     if not ok:
         raise TransitionRejected(reason)
+    moment = at or datetime.now(timezone.utc)
     new = thread.model_copy(deep=True)
     new.stage = to_stage
-    new.stage_entered_at = thread.last_activity_at
+    new.stage_entered_at = moment
+    new.last_activity_at = moment
     new.version = thread.version + 1
     return new
 
