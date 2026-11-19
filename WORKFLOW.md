@@ -9,6 +9,7 @@
 | --- | --- | --- | --- |
 | **集成区** | `D:\桌面\AIagent_project\外贸项目` | `main` | 只用来合并与整体验证，**不要在这里改代码** |
 | **实现 agent** | `D:\桌面\AIagent_project\外贸项目\.worktrees\agent-a` | `agent-a` | 开发、验证、提交都在这里 |
+| （S2 起）HTTP 接口 | `src/tradedesk/api/` + `scripts/verify_s2.py` | — | S2 新增：Supervisor / Handoff / FastAPI / 闸门令牌守卫 |
 | **审核 agent** | `D:\桌面\AIagent_project\外贸项目\.worktrees\agent-b` | `agent-b` | 审核、改进、提交都在这里 |
 
 两个 worktree 是**同一仓库的两个检出**，共享 git 对象库，但文件互相独立 —— 一个 agent 改文件不会影响另一个。
@@ -21,7 +22,7 @@
 3. **不碰对方的分支**。不要 checkout / rebase / reset / commit 到对方的分支上。
 4. **不覆盖对方未提交的工作**。合并只在集成分支 `main` 上做，且必须先确认对方分支已提交。
 5. **提交粒度 = 一个切片**。一个切片一次提交，提交信息写清楚改了什么、影响什么。
-6. **提交前自检必须全绿**：在自己的 worktree 里跑 `dev.ps1 check`（语法 + 双后端验证 + pytest）。
+6. **提交前自检必须全绿**：在自己的 worktree 里跑 `dev.ps1 check`（语法 + S1 双后端验证 + S2 验证 + pytest）。
 7. **数据库要隔离**：两个 agent 用同一个 Postgres 容器，但**各用各的数据库**（见第 4 节），避免一个 agent 清表把另一个 agent 的验证搞挂。
 
 ## 3. 提交信息格式
@@ -76,7 +77,7 @@ $docker = "C:\Users\DELL\AppData\Local\Programs\DockerDesktop\resources\bin\dock
 
 ```powershell
 $dev = "D:\桌面\AIagent_project\外贸项目\.worktrees\agent-a\dev.ps1"   # 换成自己的
-& $dev check        # 交付前自检：语法 + 双后端验证 + pytest
+& $dev check        # 交付前自检：语法 + S1 双后端验证 + S2 验证 + pytest
 & $dev verify       # 只跑 S1 验证
 & $dev test         # 只跑 pytest
 & $dev clean        # 清理临时物

@@ -8,7 +8,7 @@
 | 切片 | 内容 | 状态 | 验证方式 |
 | --- | --- | --- | --- |
 | **S1** | 时间维度骨架：状态机 + 存储（SQLite & PostgreSQL）+ 闸门令牌 + 审计哈希链 | ✅ 已完成 | `python scripts/verify_s1.py --backend both`（48 项 × 2 后端） |
-| S2 | Supervisor 路由 + Handoff 协议 + HTTP 接口（FastAPI） | 计划中 | `scripts/verify_s2.py` |
+| **S2** | Supervisor 路由与仲裁 + Handoff 13 字段契约 + FastAPI 接口 + 闸门令牌守卫 + AgentSpec/注册表 | ✅ 已完成 | `python scripts/verify_s2.py`（53 项） |
 | S3 | Sentinel 名单核验 + Inquiry 草稿装配 | 计划中 | `scripts/verify_s3.py` |
 | S4 | 检索层（词法兜底 → BGE-M3 + pgvector 可替换） | 计划中 | `scripts/verify_s4.py` |
 | S5 | 接真模型（MiniMax API Key）+ 成本计量 | 计划中 | `scripts/verify_s5.py` |
@@ -134,14 +134,24 @@ src/tradedesk/
 │   ├── sqlite_store.py   SQLite 实现（零依赖、便于单机验证）
 │   └── postgres_store.py PostgreSQL 16 实现（与 SQLite 同一接口，可替换）
 ├── runtime/
-│   └── gates.py          11 条人审闸门 + 闸门令牌服务（一次性消费）
+│   ├── gates.py          11 条人审闸门 + 闸门令牌服务（一次性消费）
+│   ├── handoff.py        Handoff 契约：13 个必填字段，缺一即拒
+│   └── supervisor.py     调度器：意图路由 / 风控优先仲裁 / 幂等 / 签核 / SLA
+├── agents/
+│   ├── inquiry.py        询盘应答 Agent（意图识别 + 草稿装配 + 引用；S5 换真模型）
+│   ├── sentinel.py       交易风控 Agent（名单核验 + 风险分级 + 证据链）
+│   └── registry.py       角色注册表（Merch/Growth 仅声明，调用返回未实现）
+├── api/
+│   ├── app.py            FastAPI 接口层（只搬运参数与鉴权，不写业务规则）
+│   └── deps.py           依赖装配 + 闸门令牌守卫（无令牌写操作一律 403）
 └── data/seed.py          演示数据（名单为结构化演示数据，非真实名单）
 docker/
 └── pgvector/Dockerfile   本地构建 pgvector 镜像（Docker Hub 不可达时的路径）
 docker-compose.yml        db（PostgreSQL 16）+ redis
 Dockerfile                应用镜像（S2 起使用）
 scripts/verify_s1.py      S1 验证脚本（双后端）
-tests/                    pytest 用例（26 项）
+scripts/verify_s2.py      S2 验证脚本（编排 + HTTP + 闸门，53 项）
+tests/                    pytest 用例（85 项）
 ```
 
 ## 设计要点（为什么这么写）

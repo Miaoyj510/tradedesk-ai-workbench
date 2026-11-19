@@ -87,19 +87,25 @@ switch ($Command.ToLower()) {
     $DsnArgs = @()
     if ($Dsn) { $DsnArgs = @("--dsn", $Dsn) }
     Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "[check 1/3] Python 语法检查（src / tests / scripts）" -ForegroundColor Cyan
+    Write-Host "[check 1/4] Python 语法检查（src / tests / scripts）" -ForegroundColor Cyan
     $py = Get-PythonExe
     & $py -m compileall -q (Join-Path $Root "src") (Join-Path $Root "tests") (Join-Path $Root "scripts")
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 语法检查未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ 语法检查通过" -ForegroundColor Green
 
-    Write-Host "[check 2/3] S1 验证（SQLite + PostgreSQL 双后端）" -ForegroundColor Cyan
+    Write-Host "[check 2/4] S1 验证（SQLite + PostgreSQL 双后端）" -ForegroundColor Cyan
     if ($DsnArgs.Count -gt 0) { & $py (Join-Path $Root "scripts\verify_s1.py") --backend both @DsnArgs }
     else { & $py (Join-Path $Root "scripts\verify_s1.py") --backend both }
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 验证未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ 验证通过" -ForegroundColor Green
 
-    Write-Host "[check 3/3] pytest 单元测试" -ForegroundColor Cyan
+      Write-Host "[check 3/4] S2 验证（编排运行时 + HTTP 接口 + 闸门）" -ForegroundColor Cyan
+      & $py (Join-Path $Root "scripts\verify_s2.py")
+      if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S2 验证未通过" -ForegroundColor Red; exit 1 }
+      Write-Host "  ✓ S2 验证通过" -ForegroundColor Green
+
+
+    Write-Host "[check 4/4] pytest 单元测试" -ForegroundColor Cyan
     if ($Dsn) { $env:TRADEDESK_TEST_DSN = $Dsn }
     & $py -m pytest -q
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 测试未通过" -ForegroundColor Red; exit 1 }
@@ -108,6 +114,14 @@ switch ($Command.ToLower()) {
     Write-Host "==============================================" -ForegroundColor Cyan
     Write-Host "全部检查通过。项目状态良好。" -ForegroundColor Green
     exit 0
+    }
+
+  "serve" {
+    Write-Host "[serve] 启动 HTTP 接口（http://127.0.0.1:8080/docs）" -ForegroundColor Cyan
+    $py = Get-PythonExe
+    $env:PYTHONPATH = Join-Path $Root "src"
+    & $py -m uvicorn tradedesk.api.app:create_app --factory --host 127.0.0.1 --port 8080
+    exit $LASTEXITCODE
   }  "push" {
     Write-Host "[push] 推送当前分支到 GitHub（git 优先，失败自动切 API）" -ForegroundColor Cyan
     & (Join-Path $Root "scripts\push.ps1")
@@ -150,6 +164,7 @@ TradeDesk-AI 开发脚本（项目根：$Root）
   test     跑 pytest
   status   查看容器与端口
   check    交付前自检：语法 + 双后端验证 + pytest
+  serve    启动 HTTP 接口（FastAPI，/docs 有接口文档）
   push     推送当前分支到 GitHub（git 优先，失败自动切 API）
   clean    清理验证临时文件、缓存与 __pycache__
   # 说明：verify 跑完会自动清理临时物，clean 只是手动扫尾
