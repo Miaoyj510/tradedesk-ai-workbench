@@ -20,7 +20,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import audit_hash, enum_val
+from .base import ConcurrentUpdate, audit_hash, enum_val
 from ..domain.models import (
     AuditEntry,
     CustomerProfile,
@@ -52,12 +52,15 @@ CREATE TABLE IF NOT EXISTS threads (
     buyer_id   TEXT NOT NULL,
     stage      TEXT NOT NULL,
     language   TEXT NOT NULL,
+    message_hash TEXT NOT NULL DEFAULT '',
     version    INTEGER NOT NULL,
     payload    JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_threads_stage ON threads(stage);
 CREATE INDEX IF NOT EXISTS idx_threads_buyer ON threads(buyer_id);
+-- 幂等兜底：同一买家的同一条消息只能建出一条线程（并发重复投递）
+CREATE UNIQUE INDEX IF NOT EXISTS uq_threads_msg ON threads(buyer_id, message_hash) WHERE message_hash <> '';
 CREATE TABLE IF NOT EXISTS thread_events (
     thread_id  TEXT NOT NULL,
     seq        INTEGER NOT NULL,
@@ -130,8 +133,20 @@ class PostgresStateStore:
     # ---------- 基础设施 ----------
     def init_schema(self) -> None:
         with self.conn.cursor() as cur:
+            # 先给老库补列，再建索引（DDL 里有依赖新列的唯一索引）
+            cur.execute("SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name='threads' AND column_name='message_hash'")
+            if cur.fetchone() is None:
+                cur.execute("SELECT 1 FROM information_schema.tables "
+                            "WHERE table_name='threads'")
+                if cur.fetchone() is not None:
+                    cur.execute("ALTER TABLE threads ADD COLUMN message_hash TEXT NOT NULL DEFAULT ''")
             cur.execute(DDL)
             # 轻量迁移：老库补列
+            tcols = cur.execute("SELECT column_name FROM information_schema.columns "
+                                "WHERE table_name='threads' AND column_name='message_hash'").fetchone()
+            if tcols is None:
+                cur.execute("ALTER TABLE threads ADD COLUMN message_hash TEXT NOT NULL DEFAULT ''")
             cur.execute("SELECT column_name FROM information_schema.columns "
                         "WHERE table_name='gate_tokens' AND column_name='action'")
             if cur.fetchone() is None:
@@ -190,16 +205,44 @@ class PostgresStateStore:
     def create_thread(self, thread: ThreadState) -> None:
         with self.conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO threads(thread_id, buyer_id, stage, language, version, payload, updated_at) "
-                "VALUES(%s,%s,%s,%s,%s,%s, now())",
+                "INSERT INTO threads(thread_id, buyer_id, stage, language, message_hash, version, payload, updated_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s, now())",
                 (
                     thread.thread_id, thread.buyer_id,
                     enum_val(thread.stage),
                     enum_val(thread.language),
+                    thread.last_message_hash,
                     thread.version,
                     json.dumps(thread.model_dump(mode="json"), ensure_ascii=False, default=_json_default),
                 ),
             )
+
+    def create_thread_if_absent(self, thread: ThreadState) -> bool:
+        """原子建线程：已存在同 id 或同 (买家, 消息哈希) 时返回 False（= 重复消息）。"""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO threads(thread_id, buyer_id, stage, language, message_hash, version, payload, updated_at) "
+                "VALUES(%s,%s,%s,%s,%s,%s,%s, now()) ON CONFLICT DO NOTHING",
+                (
+                    thread.thread_id, thread.buyer_id,
+                    enum_val(thread.stage),
+                    enum_val(thread.language),
+                    thread.last_message_hash,
+                    thread.version,
+                    json.dumps(thread.model_dump(mode="json"), ensure_ascii=False, default=_json_default),
+                ),
+            )
+            return cur.rowcount > 0
+
+    def allocate_thread_id(self, prefix: str = "T-", start: int = 2000) -> str:
+        """持久取号：原子自增，进程重启/多实例都不撞号。"""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO schema_meta(key, value) VALUES('thread_seq', 1) "
+                "ON CONFLICT (key) DO UPDATE SET value = (schema_meta.value::bigint + 1) "
+                "RETURNING value")
+            nxt = int(cur.fetchone()[0])
+            return f"{prefix}{start + nxt}"
 
     def get_thread(self, thread_id: str) -> Optional[ThreadState]:
         with self.conn.cursor() as cur:
@@ -224,10 +267,7 @@ class PostgresStateStore:
             if cur.rowcount == 0:
                 cur.execute("SELECT version FROM threads WHERE thread_id=%s", (thread.thread_id,))
                 row = cur.fetchone()
-                raise RuntimeError(
-                    f"并发冲突：thread {thread.thread_id} 当前版本 "
-                    f"{row[0] if row else '?'}，提交版本 {thread.version}"
-                )
+                raise ConcurrentUpdate(thread.thread_id, row[0] if row else "?", thread.version)
 
     def list_threads(self, **filters: Any) -> List[ThreadState]:
         sql, params = "SELECT payload FROM threads", []

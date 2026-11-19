@@ -46,6 +46,10 @@ class Config:
     kb_version: str = "kb-2026.11-b"
     list_version: str = "sanctions-2026.11-a"
     # 业务阈值
+    # SLA 按业务类型可配置（FR-ORC-08：≥3 类）
+    sla_first_response_s: int = 300      # 首响
+    sla_quote_s: int = 3600             # 报价
+    sla_followup_s: int = 86400          # 跟进
     low_confidence_threshold: float = 0.55
     amount_threshold_usd: float = 5000.0
     gate_token_ttl_s: int = 900
@@ -77,6 +81,9 @@ class Config:
             reranker_model=get("TRADEDESK_RERANKER_MODEL", "bge-reranker-v2-m3"),
             kb_version=get("TRADEDESK_KB_VERSION", "kb-2026.11-b"),
             list_version=get("TRADEDESK_LIST_VERSION", "sanctions-2026.11-a"),
+            sla_first_response_s=int(get("TRADEDESK_SLA_FIRST_RESPONSE_S", "300")),
+            sla_quote_s=int(get("TRADEDESK_SLA_QUOTE_S", "3600")),
+            sla_followup_s=int(get("TRADEDESK_SLA_FOLLOWUP_S", "86400")),
             low_confidence_threshold=float(get("TRADEDESK_LOW_CONFIDENCE_THRESHOLD", "0.55")),
             amount_threshold_usd=float(get("TRADEDESK_AMOUNT_THRESHOLD_USD", "5000")),
             gate_token_ttl_s=int(get("TRADEDESK_GATE_TOKEN_TTL_S", "900")),

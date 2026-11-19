@@ -87,25 +87,31 @@ switch ($Command.ToLower()) {
     $DsnArgs = @()
     if ($Dsn) { $DsnArgs = @("--dsn", $Dsn) }
     Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "[check 1/4] Python 语法检查（src / tests / scripts）" -ForegroundColor Cyan
+    Write-Host "[check 1/5] Python 语法检查（src / tests / scripts）" -ForegroundColor Cyan
     $py = Get-PythonExe
     & $py -m compileall -q (Join-Path $Root "src") (Join-Path $Root "tests") (Join-Path $Root "scripts")
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 语法检查未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ 语法检查通过" -ForegroundColor Green
 
-    Write-Host "[check 2/4] S1 验证（SQLite + PostgreSQL 双后端）" -ForegroundColor Cyan
+    Write-Host "[check 2/5] S1 验证（SQLite + PostgreSQL 双后端）" -ForegroundColor Cyan
     if ($DsnArgs.Count -gt 0) { & $py (Join-Path $Root "scripts\verify_s1.py") --backend both @DsnArgs }
     else { & $py (Join-Path $Root "scripts\verify_s1.py") --backend both }
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 验证未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ 验证通过" -ForegroundColor Green
 
-      Write-Host "[check 3/4] S2 验证（编排运行时 + HTTP 接口 + 闸门）" -ForegroundColor Cyan
+      Write-Host "[check 3/5] S2 验证（编排运行时 + HTTP 接口 + 闸门）" -ForegroundColor Cyan
       & $py (Join-Path $Root "scripts\verify_s2.py")
       if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S2 验证未通过" -ForegroundColor Red; exit 1 }
       Write-Host "  ✓ S2 验证通过" -ForegroundColor Green
 
 
-    Write-Host "[check 4/4] pytest 单元测试" -ForegroundColor Cyan
+    Write-Host "[check 4/5] S2 独立审核（审核方断言，非自证）" -ForegroundColor Cyan
+    if ($DsnArgs.Count -gt 0) { & $py (Join-Path $Root "scripts\audit_s2.py") @DsnArgs }
+    else { & $py (Join-Path $Root "scripts\audit_s2.py") }
+    if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S2 独立审核未通过" -ForegroundColor Red; exit 1 }
+    Write-Host "  ✓ S2 独立审核通过" -ForegroundColor Green
+
+    Write-Host "[check 5/5] pytest 单元测试" -ForegroundColor Cyan
     if ($Dsn) { $env:TRADEDESK_TEST_DSN = $Dsn }
     & $py -m pytest -q
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 测试未通过" -ForegroundColor Red; exit 1 }

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import audit_hash, canonical_ts, enum_val
+from .base import ConcurrentUpdate, ConcurrentUpdate, audit_hash, canonical_ts, enum_val
 from ..domain.models import (
     AuditEntry,
     CustomerProfile,
@@ -46,12 +46,15 @@ CREATE TABLE IF NOT EXISTS threads (
     buyer_id    TEXT NOT NULL,
     stage       TEXT NOT NULL,
     language    TEXT NOT NULL,
+    message_hash TEXT NOT NULL DEFAULT '',
     version     INTEGER NOT NULL,
     payload     TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_threads_stage ON threads(stage);
 CREATE INDEX IF NOT EXISTS idx_threads_buyer ON threads(buyer_id);
+-- 幂等兜底：同一买家的同一条消息只能建出一条线程（并发重复投递）
+CREATE UNIQUE INDEX IF NOT EXISTS uq_threads_msg ON threads(buyer_id, message_hash) WHERE message_hash <> '';
 
 CREATE TABLE IF NOT EXISTS thread_events (
     thread_id  TEXT NOT NULL,
@@ -149,6 +152,14 @@ class SqliteStateStore:
 
     # ---------- 基础设施 ----------
     def init_schema(self) -> None:
+        # 先给老库补列，再建索引 —— DDL 里有依赖新列的唯一索引，顺序反了会直接炸
+        try:
+            tcols = {r[1] for r in self._conn.execute("PRAGMA table_info(threads)")}
+            if tcols and "message_hash" not in tcols:
+                self._conn.execute(
+                    "ALTER TABLE threads ADD COLUMN message_hash TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         self._conn.executescript(DDL)
         # 轻量迁移：老库补列（CREATE TABLE IF NOT EXISTS 不会给已存在的表加列）
         _cols = {r[1] for r in self._conn.execute("PRAGMA table_info(gate_tokens)")}
@@ -222,15 +233,44 @@ class SqliteStateStore:
     # ---------- 线程 ----------
     def create_thread(self, thread: ThreadState) -> None:
         self._conn.execute(
-            "INSERT INTO threads(thread_id, buyer_id, stage, language, version, payload, updated_at) "
-            "VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO threads(thread_id, buyer_id, stage, language, message_hash, version, payload, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?)",
             (
                 thread.thread_id, thread.buyer_id, enum_val(thread.stage), enum_val(thread.language),
+                thread.last_message_hash,
                 thread.version, _dumps(thread.model_dump(mode="json")),
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
         self._conn.commit()
+
+    def create_thread_if_absent(self, thread: ThreadState) -> bool:
+        """原子建线程：已存在同 id 或同 (买家, 消息哈希) 时返回 False（= 重复消息）。"""
+        with self._write_lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO threads(thread_id, buyer_id, stage, language, message_hash, version, payload, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    thread.thread_id, thread.buyer_id, enum_val(thread.stage), enum_val(thread.language),
+                    thread.last_message_hash,
+                    thread.version, _dumps(thread.model_dump(mode="json")),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def allocate_thread_id(self, prefix: str = "T-", start: int = 2000) -> str:
+        """持久取号：计数器存在 schema_meta —— 进程重启、多实例都不撞号。"""
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT value FROM schema_meta WHERE key='thread_seq'").fetchone()
+            nxt = (int(row["value"]) if row else 0) + 1
+            self._conn.execute(
+                "INSERT INTO schema_meta(key, value) VALUES('thread_seq', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(nxt),))
+            self._conn.commit()
+            return f"{prefix}{start + nxt}"
 
     def get_thread(self, thread_id: str) -> Optional[ThreadState]:
         row = self._conn.execute(
@@ -251,10 +291,9 @@ class SqliteStateStore:
             )
             if cur.rowcount == 0:
                 existing = self.get_thread(thread.thread_id)
-                raise RuntimeError(
-                    f"并发冲突：thread {thread.thread_id} 当前版本 "
-                    f"{existing.version if existing else '?'}，提交版本 {thread.version}"
-                )
+                raise ConcurrentUpdate(
+                    thread.thread_id,
+                    existing.version if existing else "?", thread.version)
             self._conn.commit()
 
     def list_threads(self, **filters: Any) -> List[ThreadState]:

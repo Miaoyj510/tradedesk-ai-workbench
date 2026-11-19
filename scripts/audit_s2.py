@@ -210,6 +210,13 @@ def spy_registry(calls: list) -> Registry:
 # --------------------------------------------------------------------------
 # §1 意图路由（FR-ORC-01，PRD 8.2）
 # --------------------------------------------------------------------------
+def advance_with_token(c, thread_id: str, to_stage: str = "QUOTING"):
+    """推进阶段：按 PRD 8.9 / 审核 P0-1，写操作必须带闸门令牌（action=advance_stage）。"""
+    tok = c.post(f"/threads/{thread_id}/gate-token",
+                  json={"draft_id": f"DRAFT-{thread_id}", "action": "advance_stage"}).json()["token"]
+    return c.post(f"/threads/{thread_id}/advance", json={"to_stage": to_stage},
+                  headers={"X-Gate-Token": tok})
+
 def audit_1_routing() -> None:
     section("§1 意图路由（FR-ORC-01 / PRD 8.2 路由规则）")
     store = new_store(truncate=True)
@@ -273,7 +280,7 @@ def audit_1_routing() -> None:
           prof is not None and prof.contact_history_digest.count("T-") >= 2,
           (prof.contact_history_digest[:80] if prof else ""))
     ta = ths[0]["thread_id"]
-    c5.post(f"/threads/{ta}/advance", json={"to_stage": "QUOTING"})
+    advance_with_token(c5, ta, "QUOTING")
     a = c5.get(f"/threads/{ta}").json()
     b = c5.get(f"/threads/{ths[1]['thread_id']}").json()
     check("A 推进阶段不影响 B（线程状态独立）",
@@ -674,7 +681,7 @@ def audit_5_audit() -> None:
           f"A={len(evs)} 条, B={len(evs2)} 条")
 
     clause("5.3")
-    c.post(f"/threads/{tid}/advance", json={"to_stage": "QUOTING"})
+    advance_with_token(c, tid, "QUOTING")
     evs = c.get(f"/threads/{tid}/events").json()
     sc = [e for e in evs if e["event_type"] == "stage.changed"]
     ok = bool(sc) and "from" in sc[-1]["payload"] and "to" in sc[-1]["payload"] and sc[-1]["actor"]
@@ -775,7 +782,7 @@ def audit_extra() -> None:
 
     def race2():
         try:
-            r = c.post(f"/threads/{d['thread_id']}/advance", json={"to_stage": "QUOTING"})
+            r = advance_with_token(c, d["thread_id"], "QUOTING")
             with lock:
                 codes.append(r.status_code)
         except Exception as e:  # noqa: BLE001

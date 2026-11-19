@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 from ..agents.inquiry import InquiryAgent
 from ..agents.registry import MERCH_SPEC, GROWTH_SPEC, Registry
@@ -42,6 +42,10 @@ class AppContext:
             store=store, registry=self.registry, token_service=self.tokens,
             low_confidence_threshold=self.config.low_confidence_threshold,
             amount_threshold=self.config.amount_threshold_usd,
+            # SLA 按业务类型可配置（FR-ORC-08）：首响 / 报价 / 跟进
+            sla_first_response=self.config.sla_first_response_s,
+            sla_quote=self.config.sla_quote_s,
+            sla_followup=self.config.sla_followup_s,
         )
 
 
@@ -52,12 +56,34 @@ def get_context() -> AppContext:
     return AppContext(store=store, config=cfg)
 
 
-def require_gate_token(x_gate_token: Optional[str] = Header(default=None)) -> str:
-    """写操作的闸门令牌守卫：没有令牌直接 403（FR-ORC-09 / NFR-SEC-04）。"""
-    if not x_gate_token or not x_gate_token.strip():
-        raise HTTPException(
-            status_code=403,
-            detail={"code": "gate_token_required",
-                    "message": "写操作必须携带闸门令牌（请求头 X-Gate-Token）"},
-        )
-    return x_gate_token.strip()
+def make_gate_token_guard(ctx: "AppContext"):
+    """闸门令牌守卫工厂。
+
+    没有令牌直接 403（FR-ORC-09 / NFR-SEC-04），**并且必须留痕** ——
+    不带令牌的越权尝试恰恰是最该留痕的一类（PRD 11.4「越权尝试」）。
+    """
+
+    def require_gate_token(
+        x_gate_token: Optional[str] = Header(default=None),
+        request: Request = None,  # type: ignore[assignment]
+    ) -> str:
+        # 路径参数在路由匹配后才有值，从 request 里取（Path 参数不允许默认值）
+        thread_id = ""
+        try:
+            thread_id = request.path_params.get("thread_id", "") if request is not None else ""
+        except Exception:
+            thread_id = ""
+        if not x_gate_token or not x_gate_token.strip():
+            try:
+                ctx.store.append_audit("system", "write.rejected", thread_id,
+                                       {"reason": "缺少闸门令牌", "path_action": "write"})
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "gate_token_required",
+                        "message": "写操作必须携带闸门令牌（请求头 X-Gate-Token）"},
+            )
+        return x_gate_token.strip()
+
+    return require_gate_token

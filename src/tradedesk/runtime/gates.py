@@ -218,6 +218,7 @@ class GateTokenService:
 
     def issue(self, thread_id: str, draft_id: str, gates: List[GateId],
               action: str = "") -> GateToken:
+
         token = GateToken(
             token=secrets.token_urlsafe(24),
             thread_id=thread_id,
@@ -237,7 +238,8 @@ class GateTokenService:
                 action: str = "") -> bool:
         """消费令牌。**动作必须匹配**：为"发送"签发的令牌不能拿去推进阶段。"""
         token = self.store.get_gate_token(token_id)
-        if token is not None and action and token.action and token.action != action:
+        # 不做"空动作短路"：action 为空的令牌是**万能令牌**，必须一律拒绝
+        if token is not None and token.action != action:
             self.store.append_audit(
                 "system", "write.rejected", thread_id,
                 {"reason": "闸门令牌动作不匹配", "token_action": token.action,

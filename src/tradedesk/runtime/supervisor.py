@@ -20,9 +20,9 @@ from pydantic import BaseModel, Field
 from ..agents.base import AgentRequest, AgentResult, AgentStatus
 from ..agents.registry import Registry
 from ..domain.enums import Actor, EventType, GateId, Intent, Language, RiskLevel, Stage
-from ..domain.models import Draft, Gate, ThreadEvent, ThreadState
+from ..domain.models import Deadline, Draft, Gate, ThreadEvent, ThreadState
 from ..domain.state_machine import TransitionRejected, apply_transition, build_thread
-from ..store.base import StateStore
+from ..store.base import ConcurrentUpdate, StateStore
 from .gates import (
     GateTokenService,
     blocking_gates,
@@ -66,12 +66,19 @@ class Supervisor:
     def __init__(self, store: StateStore, registry: Registry,
                  token_service: Optional[GateTokenService] = None,
                  low_confidence_threshold: float = 0.55,
-                 amount_threshold: float = 5000.0) -> None:
+                 amount_threshold: float = 5000.0,
+                 sla_first_response: Optional[int] = None,
+                 sla_quote: Optional[int] = None,
+                 sla_followup: Optional[int] = None) -> None:
         self.store = store
         self.registry = registry
         self.tokens = token_service or GateTokenService(store)
         self.low_confidence_threshold = low_confidence_threshold
         self.amount_threshold = amount_threshold
+        # SLA 按业务类型可配置（FR-ORC-08）：首响 / 报价 / 跟进
+        self.sla_first_response = sla_first_response if sla_first_response is not None else SLA_DEFAULTS["first_response"]
+        self.sla_quote = sla_quote if sla_quote is not None else SLA_DEFAULTS["quote"]
+        self.sla_followup = sla_followup if sla_followup is not None else SLA_DEFAULTS["followup"]
         # 草稿暂存内存（S2 未做草稿持久化；S4 接真检索后改为随事件落库）
         self.drafts: Dict[str, Draft] = {}
         # 线程号自增（并发下唯一）
@@ -160,10 +167,26 @@ class Supervisor:
         decision = self.route(message, language)
         intents = decision["intents"]
 
-        thread = build_thread(thread_id=self._next_thread_id(), buyer_id=buyer_id,
+        # 线程号由存储层持久发放（多实例/重启都不撞号）
+        thread_id = self.store.allocate_thread_id()
+        now = datetime.now(timezone.utc)
+        thread = build_thread(thread_id=thread_id, buyer_id=buyer_id,
                               language=language, message_hash=message_hash,
                               intent_labels=intents)
-        self.store.create_thread(thread)
+        # SLA 时限由 SLA_DEFAULTS 生成（否则 Watchdog 永远扫不到东西）
+        thread.deadlines = [
+            Deadline(label="首响 SLA", due_at=now + timedelta(seconds=self.sla_first_response), level="ok"),
+            Deadline(label="报价 SLA", due_at=now + timedelta(seconds=self.sla_quote), level="ok"),
+            Deadline(label="跟进 SLA", due_at=now + timedelta(seconds=self.sla_followup), level="ok"),
+        ]
+        # 原子建线程：并发重复投递只会建出一条（撞唯一约束即视为重复）
+        if not self.store.create_thread_if_absent(thread):
+            existing = self.store.get_thread(thread_id)
+            self._log(thread_id, EventType.MESSAGE_DUPLICATE,
+                      {"message_hash": message_hash, "stage": "INQUIRY"})
+            return IngestResult(thread_id=thread_id, status="duplicate",
+                                message="重复消息，已忽略", duplicate=True,
+                                intent_labels=intents)
         self._log(thread.thread_id, EventType.THREAD_CREATED,
                   {"stage": thread.stage.value, "intents": [i.value for i in intents],
                    "message_hash": message_hash})
@@ -193,6 +216,16 @@ class Supervisor:
                                 evidence=[{"注入特征": injection}],
                                 intent_labels=intents,
                                 next_action="人工判定（安全记录已留痕）")
+
+        # 路由到"本期未实现"（未注册/仅声明角色）→ 显式返回，不静默降级、也不抛 500
+        if decision["target"] == "not_implemented":
+            self._log(thread.thread_id, EventType.HUMAN_TAKEOVER,
+                      {"reason": decision["reason"]}, actor=Actor.SYSTEM)
+            self._audit("system", "route.not_implemented", thread.thread_id,
+                        {"reason": decision["reason"]})
+            return IngestResult(thread_id=thread.thread_id, status="not_implemented",
+                                message="负责该意图的角色本期未实现，已转人工",
+                                intent_labels=intents, next_action="转人工处理")
 
         # 路由到人工（投诉）
         if decision["target"] == "human":
@@ -282,7 +315,9 @@ class Supervisor:
         self.drafts[thread.thread_id] = draft
         self._log(thread.thread_id, EventType.DRAFT_GENERATED,
                   {"draft_id": draft_id(thread), "intent_labels": [i.value for i in result.intent_labels],
-                   "confidence": result.confidence, "citations": len(draft.citations)})
+                   "confidence": result.confidence, "citations": len(draft.citations),
+                   # 草稿随事件落库：进程重启后签核界面不能是空的（FR-ORC-04）
+                   "draft": draft.model_dump(mode="json")}, actor=Actor.AGENT)
 
         # 闸门评估（人工签核前）
         gates = evaluate_gates(thread, draft, self.low_confidence_threshold, self.amount_threshold)
@@ -337,12 +372,24 @@ class Supervisor:
         }
 
     def get_draft(self, thread_id: str) -> Optional[Draft]:
-        """取该线程最近一次的草稿。"""
-        return self.drafts.get(thread_id)
+        """取该线程最近一次的草稿。
+
+        优先从事件日志读（跨进程/重启后仍在），内存只是加速缓存。
+        """
+        cached = self.drafts.get(thread_id)
+        if cached is not None:
+            return cached
+        for e in reversed(self.store.list_events(thread_id)):
+            if e.event_type.value == "draft.generated" and e.payload.get("draft"):
+                draft = Draft.model_validate(e.payload["draft"])
+                self.drafts[thread_id] = draft
+                return draft
+        return None
 
     # ------------------------------------------------------- 3) 人工签核
     def sign_off(self, *, thread_id: str, draft_id: str, token: str,
-                 action: str, reason: str = "", actor: str = "李静") -> Dict[str, Any]:
+                 action: str, reason: str = "", actor: str = "李静",
+                 body: Optional[str] = None, terms: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """人工签核。**必须带有效闸门令牌**，否则拒绝（写操作与生成分离）。
 
         action: approve | modify | reject | transfer
@@ -359,20 +406,42 @@ class Supervisor:
             return {"ok": False, "code": "gate_token_invalid",
                     "message": "闸门令牌无效、已使用或与线程/草稿不匹配，写操作被拒绝"}
 
+        # 价格条款：签核留痕必须含单价/币种/贸易术语/有效期/阶梯量 + 条款版本（PRD 8.5 GATE-01）
+        terms_payload = self._extract_terms(thread_id, body=body, extra=terms)
+
         if action == "approve":
             thread.price_signed_off = True
             thread.delivery_signed_off = True
             thread.status_flags = [f for f in thread.status_flags if f != "awaiting_signoff"]
             self._log(thread_id, EventType.SIGNED_OFF,
-                      {"draft_id": draft_id, "action": action, "actor": actor}, actor=Actor.HUMAN)
-            self._audit(actor, "signed_off", thread_id, {"draft_id": draft_id, "action": action})
+                      {"draft_id": draft_id, "action": action, "actor": actor,
+                       **terms_payload}, actor=Actor.HUMAN)
+            self._audit(actor, "signed_off", thread_id,
+                        {"draft_id": draft_id, "action": action, **terms_payload})
         elif action == "modify":
+            # "修改后通过"应当承载修改内容（FR-HUM-06）：带了正文就落为新的草稿版本；
+            # 没带则放行但留痕说明"未提供修改内容"，避免人改的东西被静默丢弃却毫无痕迹
+            modified = bool(body and body.strip())
             thread.price_signed_off = True
             thread.delivery_signed_off = True
             thread.status_flags = [f for f in thread.status_flags if f != "awaiting_signoff"]
+            draft = self.get_draft(thread_id)
+            if modified and draft is not None:
+                draft.body = body
+                self.drafts[thread_id] = draft
+                self._log(thread_id, EventType.DRAFT_GENERATED,
+                          {"draft_id": draft_id, "modified": True, "confidence": draft.confidence,
+                           "citations": len(draft.citations),
+                           "draft": draft.model_dump(mode="json")}, actor=Actor.HUMAN)
             self._log(thread_id, EventType.SIGNED_OFF,
-                      {"draft_id": draft_id, "action": action, "actor": actor}, actor=Actor.HUMAN)
-            self._audit(actor, "signed_off_modified", thread_id, {"draft_id": draft_id})
+                      {"draft_id": draft_id, "action": action, "actor": actor,
+                       "modified": modified,
+                       "note": None if modified else "未提供修改内容，按原草稿签核",
+                       **terms_payload}, actor=Actor.HUMAN)
+            self._audit(actor, "signed_off_modified", thread_id,
+                        {"draft_id": draft_id, "modified": modified,
+                         "note": None if modified else "未提供修改内容，按原草稿签核",
+                         **terms_payload})
         elif action == "reject":
             # 驳回必须带原因，并归类回灌给 Agent（FR-HUM-06 / FR-HUM-07）
             try:
@@ -395,8 +464,12 @@ class Supervisor:
                       {"draft_id": draft_id, "actor": actor, "reason": reason}, actor=Actor.HUMAN)
             self._audit(actor, "handed_over", thread_id, {"reason": reason})
 
+        thread.last_activity_at = datetime.now(timezone.utc)
         thread.version += 1
-        self.store.save_thread(thread)
+        try:
+            self.store.save_thread(thread)
+        except ConcurrentUpdate as e:
+            return {"ok": False, "code": "concurrent_update", "message": str(e)}
         return {"ok": True, "action": action, "thread_id": thread_id,
                 "status_flags": thread.status_flags}
 
@@ -417,26 +490,74 @@ class Supervisor:
                       {"action": "send", "reason": "闸门令牌无效/已使用"}, actor=Actor.HUMAN)
             return {"ok": False, "code": "gate_token_invalid",
                     "message": "闸门令牌无效、已使用或与线程/草稿不匹配，发送被拒绝"}
-        thread.sent_at = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        thread.sent_at = now
+        thread.last_activity_at = now
         thread.status_flags = list(thread.status_flags) + ["sent"]
         thread.version += 1
-        self.store.save_thread(thread)
+        try:
+            self.store.save_thread(thread)
+        except ConcurrentUpdate as e:
+            return {"ok": False, "code": "concurrent_update", "message": str(e)}
         self._log(thread_id, EventType.SENT, {"draft_id": draft_id, "actor": actor}, actor=Actor.HUMAN)
         self._audit(actor, "message.sent", thread_id, {"draft_id": draft_id})
         return {"ok": True, "sent_at": thread.sent_at.isoformat(), "thread_id": thread_id}
 
+    def _extract_terms(self, thread_id: str, body: Optional[str] = None,
+                       extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """签核留痕要记全价格要素与条款版本（PRD 8.5 GATE-01）。"""
+        import re
+        text = body or ""
+        if not text:
+            draft = self.get_draft(thread_id)
+            text = draft.body if draft else ""
+        price = None
+        m = re.search(r"(?:USD|EUR|\$|€)\s?(\d[\d,\.]*)", text)
+        if m:
+            try:
+                price = float(m.group(1).replace(",", ""))
+            except ValueError:
+                price = None
+        terms = {
+            "unit_price": price,
+            "currency": "USD" if re.search(r"USD", text, re.I) else None,
+            "terms": "FOB" if re.search(r"FOB", text, re.I) else None,
+            "valid_until": None,
+            "tier": None,
+            "clause_version": "v1",
+        }
+        if extra:
+            terms.update({k: v for k, v in extra.items() if v is not None})
+        return terms
+
     # ------------------------------------------------------- 5) 阶段推进
-    def advance(self, *, thread_id: str, to_stage: Stage, actor: str = "李静") -> Dict[str, Any]:
+    def advance(self, *, thread_id: str, to_stage: Stage, token: str = "",
+                actor: str = "李静") -> Dict[str, Any]:
         thread = self.store.get_thread(thread_id)
         if thread is None:
             return {"ok": False, "code": "thread_not_found", "message": "线程不存在"}
+        # 推进阶段是写操作：必须带闸门令牌（PRD 8.9 / FR-ORC-09）
+        if not token:
+            self._audit(actor, "write.rejected", thread_id,
+                        {"reason": "推进阶段缺少闸门令牌", "action": "advance_stage"})
+            return {"ok": False, "code": "gate_token_required",
+                    "message": "推进阶段必须携带闸门令牌（action=advance_stage）"}
+        if not self.tokens.consume(token, thread_id, draft_id(thread_id), action="advance_stage"):
+            self._log(thread_id, EventType.WRITE_REJECTED,
+                      {"action": "advance_stage", "reason": "闸门令牌无效/已使用/不匹配"}, actor=Actor.HUMAN)
+            return {"ok": False, "code": "gate_token_invalid",
+                    "message": "闸门令牌无效、已使用或与线程/草稿不匹配，推进被拒绝"}
         try:
             new = apply_transition(thread, to_stage)
         except TransitionRejected as e:
             self._log(thread_id, EventType.TRANSITION_REJECTED,
                       {"to": to_stage.value, "reason": e.message}, actor=Actor.HUMAN)
             return {"ok": False, "code": "invalid_transition", "message": e.message}
-        self.store.save_thread(new)
+        new.last_activity_at = datetime.now(timezone.utc)
+        try:
+            self.store.save_thread(new)
+        except ConcurrentUpdate as e:
+            return {"ok": False, "code": "concurrent_update", "message": str(e)}
         self._log(thread_id, EventType.STAGE_CHANGED,
                   {"from": thread.stage.value, "to": to_stage.value}, actor=Actor.HUMAN)
         self._audit(actor, "stage.changed", thread_id,
@@ -479,14 +600,8 @@ class Supervisor:
 
     # ------------------------------------------------------- 内部
     def _next_thread_id(self) -> str:
-        """生成唯一线程号。
-
-        原来用 `len(list_threads()) + 1` 推算 —— 并发接入时两个线程会算出同一个号
-        （UNIQUE constraint failed）。这里改成进程内自增 + 锁，保证唯一。
-        """
-        with self._id_lock:
-            self._id_counter += 1
-            return f"T-{self._id_base + self._id_counter}"
+        """兼容旧调用：真正的取号在存储层（持久、多实例安全）。"""
+        return self.store.allocate_thread_id()
 
 
 def draft_id(thread_id: str) -> str:

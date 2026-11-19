@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from ..domain.enums import Stage
 from ..runtime.supervisor import IngestResult, Supervisor, draft_id
-from .deps import AppContext, get_context, require_gate_token
+from .deps import AppContext, get_context, make_gate_token_guard
 
 APP_VERSION = "0.2.0-s2"
 
@@ -30,15 +30,22 @@ class SignOffBody(BaseModel):
     draft_id: str
     action: str = Field(pattern="^(approve|modify|reject|transfer)$")
     reason: str = ""
+    body: Optional[str] = None      # 『修改后通过』的修改后正文（FR-HUM-06）
+    terms: Optional[Dict[str, Any]] = None   # 价格要素（FR-HUM-01 / PRD 8.5 GATE-01）
 
     def check(self) -> None:
         if self.action == "reject" and not self.reason.strip():
             raise ValueError("驳回必须带原因（FR-HUM-06）")
 
 
+GATE_ACTIONS = ("sign_off", "send_draft", "advance_stage")
+
+
 class GateTokenBody(BaseModel):
     draft_id: str
-    action: str = "sign_off"        # sign_off / send_draft / advance_stage
+    # 允许空串：空 action 的令牌可以被签发，但它**不能授权任何写操作**
+    # （消费时严格比对 token.action != action）—— 对应审核 R9 的 P1-2
+    action: str = Field(default="sign_off", pattern="^(sign_off|send_draft|advance_stage|)$")
 
 
 class SendBody(BaseModel):
@@ -51,6 +58,8 @@ class AdvanceBody(BaseModel):
 
 def create_app(context: Optional[AppContext] = None) -> FastAPI:
     ctx = context or get_context()
+    # 闸门令牌守卫绑定到本 app 的存储：拒绝（越权尝试）也要写审计（PRD 11.4）
+    require_gate_token = make_gate_token_guard(ctx)
     app = FastAPI(
         title="TradeDesk AI Workbench",
         version=APP_VERSION,
@@ -181,9 +190,11 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
             raise HTTPException(status_code=422,
                                 detail={"code": "reject_reason_required", "message": str(e)})
         out = sup.sign_off(thread_id=thread_id, draft_id=body.draft_id, token=token,
-                           action=body.action, reason=body.reason)
+                           action=body.action, reason=body.reason,
+                           body=body.body, terms=body.terms)
         if not out.get("ok"):
-            raise HTTPException(status_code=403,
+            status = 409 if out.get("code") == "concurrent_update" else 403
+            raise HTTPException(status_code=status,
                                 detail={"code": out.get("code"), "message": out.get("message")})
         return out
 
@@ -201,15 +212,17 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
     # ------------------------------------------------------------ 阶段推进
     @app.post("/threads/{thread_id}/advance")
     def advance(thread_id: str, body: AdvanceBody,
+                token: str = Depends(require_gate_token),
                 sup: Supervisor = Depends(supervisor)) -> Dict[str, Any]:
         try:
             to_stage = Stage(body.to_stage)
         except ValueError:
             raise HTTPException(status_code=400,
                                 detail={"code": "bad_stage", "message": "未知阶段"})
-        out = sup.advance(thread_id=thread_id, to_stage=to_stage)
+        out = sup.advance(thread_id=thread_id, to_stage=to_stage, token=token)
         if not out.get("ok"):
-            raise HTTPException(status_code=409,
+            status = 409 if out.get("code") in ("invalid_transition", "concurrent_update") else 403
+            raise HTTPException(status_code=status,
                                 detail={"code": out.get("code"), "message": out.get("message")})
         return out
 
@@ -235,7 +248,11 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
                                                        app.state.ctx.config.low_confidence_threshold,
                                                        app.state.ctx.config.amount_threshold_usd)
                      if g.hit]
-        token = app.state.ctx.tokens.issue(thread_id, body.draft_id, gates, action=body.action)
+        try:
+            token = app.state.ctx.tokens.issue(thread_id, body.draft_id, gates, action=body.action)
+        except ValueError as e:
+            raise HTTPException(status_code=422,
+                                detail={"code": "gate_action_required", "message": str(e)})
         return {"token": token.token, "expires_at": token.expires_at.isoformat(),
                 "draft_id": body.draft_id}
 

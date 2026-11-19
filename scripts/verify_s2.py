@@ -241,12 +241,26 @@ def scenario_9_stage_transition(c: TestClient) -> None:
         "language": "en", "company": "Ventura Comercial SA", "country": "MX",
     })
     tid = r.json()["thread_id"]
-    r1 = c.post(f"/threads/{tid}/advance", json={"to_stage": "QUOTING"})
+    did = r.json()["draft_id"]
+    # 推进阶段是写操作：必须带闸门令牌（PRD 8.9 / FR-ORC-09）
+    r0 = c.post(f"/threads/{tid}/advance", json={"to_stage": "QUOTING"})
+    check("推进阶段无令牌 → 403", r0.status_code == 403,
+          str(r0.json().get("detail", {}).get("code", "")))
+
+    def advance(to_stage):
+        tok = c.post(f"/threads/{tid}/gate-token",
+                     json={"draft_id": did, "action": "advance_stage"}).json()["token"]
+        return c.post(f"/threads/{tid}/advance", json={"to_stage": to_stage},
+                      headers={"X-Gate-Token": tok})
+
+    r1 = advance("QUOTING")
     check("INQUIRY → QUOTING 允许", r1.status_code == 200, str(r1.json())[:60])
-    r2 = c.post(f"/threads/{tid}/advance", json={"to_stage": "ORDERED"})
+    r2 = advance("ORDERED")
     check("无合同版本 QUOTING → ORDERED → 409",
           r2.status_code == 409, str(r2.json().get("detail", {}).get("message", ""))[:70])
-    r3 = c.post(f"/threads/{tid}/advance", json={"to_stage": "NOT_A_STAGE"})
+    r3 = c.post(f"/threads/{tid}/advance", json={"to_stage": "NOT_A_STAGE"},
+                 headers={"X-Gate-Token": c.post(f"/threads/{tid}/gate-token",
+                                                json={"draft_id": did, "action": "advance_stage"}).json()["token"]})
     check("非法阶段名 → 400", r3.status_code == 400)
 
 
@@ -257,6 +271,9 @@ def scenario_10_sla_and_audit(c: TestClient) -> None:
         "language": "en", "company": "Atlas Hardware GmbH", "country": "DE",
     })
     tid = r.json()["thread_id"]
+    # 接入后应自动带三类 SLA 时限（否则 Watchdog 永远扫不到）
+    auto_dl = c.get(f"/threads/{tid}").json().get("deadlines") or []
+    check("接入后线程自动带 SLA 时限", len(auto_dl) >= 3, f"deadlines={len(auto_dl)}")
     # 手工把时限改到过去，触发 SLA 扫描
     from tradedesk.domain.models import Deadline
     ctx = c.app.state.ctx
@@ -342,6 +359,16 @@ def scenario_13_token_action_binding(c: TestClient) -> None:
     r3 = c.post(f"/threads/{tid}/signoff", json={"draft_id": did, "action": "approve"},
                 headers={"X-Gate-Token": sign_token})
     check("同动作令牌可用 → 200", r3.status_code == 200)
+    # 空 action 的"万能令牌"：可以签发，但不能授权任何写操作
+    empty_tok = c.post(f"/threads/{tid}/gate-token",
+                       json={"draft_id": did, "action": ""}).json().get("token")
+    if empty_tok:
+        r4 = c.post(f"/threads/{tid}/send", json={"draft_id": did},
+                    headers={"X-Gate-Token": empty_tok})
+        check("空 action 令牌不得授权写操作 → 403", r4.status_code == 403,
+              str(r4.status_code))
+    else:
+        check("空 action 令牌不得授权写操作 → 403", False, "未签发出空 action 令牌")
 
 
 def scenario_14_board_filters(c: TestClient) -> None:
