@@ -5,8 +5,8 @@ __pycache__/
 .pytest_cache/
 .pytest_tmp/
 
-# 运行时数据（数据库文件、临时目录）
-data/
+# 运行时数据（**仅根目录**的 data/；src/tradedesk/data/ 是源码，必须提交）
+/data/
 *.db
 *.db-wal
 *.db-shm
