@@ -71,6 +71,7 @@ switch ($Command.ToLower()) {
   "test" {
     $py = Get-PythonExe
     Write-Host "[test] 运行 pytest ..." -ForegroundColor Cyan
+    if ($Dsn) { $env:TRADEDESK_TEST_DSN = $Dsn }
     & $py -m pytest -q
     exit $LASTEXITCODE
   }
@@ -99,6 +100,7 @@ switch ($Command.ToLower()) {
     Write-Host "  ✓ 验证通过" -ForegroundColor Green
 
     Write-Host "[check 3/3] pytest 单元测试" -ForegroundColor Cyan
+    if ($Dsn) { $env:TRADEDESK_TEST_DSN = $Dsn }
     & $py -m pytest -q
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 测试未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ 测试通过" -ForegroundColor Green

@@ -2,7 +2,13 @@
 """PostgreSQL 后端测试：容器未启动时自动跳过，不影响主流程。
 
 与 SQLite 后端跑的是同一套 StateStore 接口，验证两者行为一致。
+
+⚠ 数据库隔离：这里的库由环境变量 `TRADEDESK_TEST_DSN` 指定（dev.ps1 会把
+`-Dsn` 传进来）。两个 agent 各用各的库 —— 绝不能默认连共享的 `tradedesk` 库，
+否则一个 agent 的 `reset()` 会把另一个 agent 的数据清掉。
 """
+import os
+
 import pytest
 
 from tradedesk.domain.enums import Actor, EventType, Language
@@ -13,9 +19,14 @@ psycopg = pytest.importorskip("psycopg")
 from tradedesk.store.postgres_store import DEFAULT_DSN, PostgresStateStore  # noqa: E402
 
 
+def _dsn() -> str:
+    """本 agent 自己的库；没配就退回默认库（单 agent 本地开发场景）。"""
+    return os.environ.get("TRADEDESK_TEST_DSN") or DEFAULT_DSN
+
+
 def _store():
     try:
-        s = PostgresStateStore(DEFAULT_DSN)
+        s = PostgresStateStore(_dsn())
     except Exception as e:  # 容器没起就跳过
         pytest.skip(f"PostgreSQL 不可用：{e}")
     s.reset()
