@@ -8,7 +8,7 @@
 | 切片 | 内容 | 状态 | 验证方式 |
 | --- | --- | --- | --- |
 | **S1** | 时间维度骨架：状态机 + 存储（SQLite & PostgreSQL）+ 闸门令牌 + 审计哈希链 | ✅ 已完成 | `python scripts/verify_s1.py --backend both`（48 项 × 2 后端） |
-| **S2** | Supervisor 路由与仲裁 + Handoff 13 字段契约 + FastAPI 接口 + 闸门令牌守卫 + AgentSpec/注册表 | ✅ 已完成 | `python scripts/verify_s2.py`（53 项） |
+| **S2** | Supervisor 路由与仲裁 + Handoff 15 字段契约 + FastAPI 接口 + 闸门令牌守卫（绑定动作）+ AgentSpec/注册表 | ✅ 已完成 | `python scripts/verify_s2.py`（94 项 / 21 场景） |
 | S3 | Sentinel 名单核验 + Inquiry 草稿装配 | 计划中 | `scripts/verify_s3.py` |
 | S4 | 检索层（词法兜底 → BGE-M3 + pgvector 可替换） | 计划中 | `scripts/verify_s4.py` |
 | S5 | 接真模型（MiniMax API Key）+ 成本计量 | 计划中 | `scripts/verify_s5.py` |
@@ -150,8 +150,8 @@ docker/
 docker-compose.yml        db（PostgreSQL 16）+ redis
 Dockerfile                应用镜像（S2 起使用）
 scripts/verify_s1.py      S1 验证脚本（双后端）
-scripts/verify_s2.py      S2 验证脚本（编排 + HTTP + 闸门，53 项）
-tests/                    pytest 用例（85 项）
+scripts/verify_s2.py      S2 验证脚本（编排 + HTTP + 闸门，94 项）
+tests/                    pytest 用例（101 项）
 ```
 
 ## 设计要点（为什么这么写）
