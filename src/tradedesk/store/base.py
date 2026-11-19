@@ -1,0 +1,69 @@
+# -*- coding: utf-8 -*-
+"""存储接口（PRD 13.4.5 选型轴②/⑤ 的抽象边界）。
+
+当前实现：SQLite（零依赖、单机可跑、可验证）。
+后续实现：PostgreSQL + pgvector —— 只要实现同一接口即可替换，业务代码零改动。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
+
+from ..domain.models import (
+    AuditEntry,
+    CustomerProfile,
+    GateToken,
+    ThreadEvent,
+    ThreadState,
+)
+
+
+def canonical_ts(dt: datetime) -> str:
+    """时间戳的规范表示：两种后端算出的哈希必须一致，因此统一在这里格式化。"""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+
+def audit_hash(seq: int, actor: str, action: str, target: str, payload: Dict[str, Any],
+               ts: datetime, prev_hash: str) -> str:
+    """审计条目的哈希：内容 + 前一条哈希 → 链式防篡改。"""
+    material = "|".join([
+        str(seq), actor, action, target,
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str),
+        canonical_ts(ts), prev_hash,
+    ])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+@runtime_checkable
+class StateStore(Protocol):
+    """线程状态、客户档案、事件日志、审计、闸门令牌的持久化接口。"""
+
+    def init_schema(self) -> None: ...
+
+    # 客户档案
+    def upsert_customer(self, profile: CustomerProfile) -> None: ...
+    def get_customer(self, buyer_id: str) -> Optional[CustomerProfile]: ...
+
+    # 线程
+    def create_thread(self, thread: ThreadState) -> None: ...
+    def get_thread(self, thread_id: str) -> Optional[ThreadState]: ...
+    def save_thread(self, thread: ThreadState) -> None: ...
+    def list_threads(self, **filters: Any) -> List[ThreadState]: ...
+
+    # 事件（append-only）
+    def append_event(self, event: ThreadEvent) -> ThreadEvent: ...
+    def list_events(self, thread_id: str) -> List[ThreadEvent]: ...
+
+    # 审计（append-only + 哈希链）
+    def append_audit(self, actor: str, action: str, target: str, payload: Dict[str, Any]) -> AuditEntry: ...
+    def list_audit(self) -> List[AuditEntry]: ...
+    def verify_audit_chain(self) -> Tuple[bool, Optional[int]]: ...
+
+    # 闸门令牌
+    def issue_gate_token(self, token: GateToken) -> None: ...
+    def consume_gate_token(self, token_id: str, thread_id: str, draft_id: str) -> bool: ...
+    def get_gate_token(self, token_id: str) -> Optional[GateToken]: ...

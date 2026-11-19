@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>运营看板 · TradeDesk AI Workbench</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16v12H4z"/><path d="M4 11h16M9 7v12"/></svg>
+      </div>
+      <div><div class="brand-name">TradeDesk AI</div><div class="brand-sub">外贸数字员工工作台</div></div>
+    </div>
+    <nav class="nav" aria-label="主导航">
+      <div class="rail-label">工作区</div>
+      <a href="index.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h5l2 3h4l2-3h5M3 12l2.5-7h13L21 12v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>询盘工作台<span class="count">12</span></a>
+      <a href="dashboard.html" aria-current="page"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>运营看板</a>
+      <a href="knowledge.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-2z"/><path d="M8 3v18"/></svg>知识库与检索</a>
+      <div class="rail-label" style="margin-top:16px">Agent</div>
+      <button type="button"><span class="dot dot-live" aria-hidden="true"></span>Inquiry 询盘应答<span class="count">在线</span></button>
+      <button type="button"><span class="dot dot-live" aria-hidden="true"></span>Sentinel 交易风控<span class="count">在线</span></button>
+      <button type="button"><span class="dot dot-decl" aria-hidden="true"></span>Merch 商品运营<span class="count">仅声明</span></button>
+      <button type="button"><span class="dot dot-decl" aria-hidden="true"></span>Growth 推广<span class="count">仅声明</span></button>
+    </nav>
+    <div class="rail-foot">
+      <div class="agent-chip"><span class="dot dot-live" aria-hidden="true"></span><span>本地 Docker · 云端模型 API</span></div>
+      <div style="margin-top:6px">当前用户：<b>李静</b>（外贸业务员）</div>
+      <div style="margin-top:2px">版本 v1.0 · 原型演示</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1>运营看板</h1>
+        <div class="sub">线程漏斗 · 单位成本 · 分语种质量 · 风险事件</div>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><span class="kpi-label">今日已发送</span><span class="kpi-value">41</span></div>
+        <div class="kpi"><span class="kpi-label">草稿可用率</span><span class="kpi-value">78<small>%</small></span></div>
+        <div class="kpi"><span class="kpi-label">首响中位数</span><span class="kpi-value" style="font-size:14px">3 分 12 秒</span></div>
+        <div class="kpi"><span class="kpi-label">今日单位成本</span><span class="kpi-value">¥0.046 <small>/ 目标 ≤ ¥0.20</small></span></div>
+      </div>
+    </header>
+
+    <div style="padding:24px;display:flex;flex-direction:column;gap:24px">
+
+      <!-- 门槛状态 -->
+      <section class="card">
+        <div class="panel-hd"><h2>上线门槛（Go / No-Go）</h2><span class="hint">任一硬指标不达标即 No-Go</span></div>
+        <div class="panel-body">
+          <div class="grid-3">
+            <div class="card" style="box-shadow:none;padding:16px;border-color:#A7F3D0">
+              <div class="stat-line"><span class="v">100%</span><span class="l">引用正确率</span></div>
+              <div class="threshold">三语全部达标（硬指标，不分语种打折）</div>
+            </div>
+            <div class="card" style="box-shadow:none;padding:16px;border-color:#A7F3D0">
+              <div class="stat-line"><span class="v">99.2%</span><span class="l">名单召回率</span></div>
+              <div class="threshold">门槛 ≥99%；命中自动放行 = 0</div>
+            </div>
+            <div class="card" style="box-shadow:none;padding:16px;border-color:#A7F3D0">
+              <div class="stat-line"><span class="v">¥0.046</span><span class="l">单位询盘成本</span></div>
+              <div class="threshold">门槛 ≤ ¥0.20 / 条（缓存 + 分级模型后）</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="grid-2">
+        <!-- 线程漏斗 -->
+        <section class="card">
+          <div class="panel-hd"><h2>线程阶段漏斗</h2><span class="hint">跨天跨周长事务的分布</span></div>
+          <div class="panel-body table-wrap">
+            <table id="stage-chart"></table>
+            <p style="font-size:11px;color:var(--color-muted-foreground);margin-top:12px">阶段口径与 PRD 4.3 一致：询盘 → 样品 → 报价 → 订单 → 单证 → 收款；单证与收款本期仅保留状态位。</p>
+          </div>
+        </section>
+
+        <!-- 成本 -->
+        <section class="card">
+          <div class="panel-hd"><h2>单位成本（按任务算账）</h2><span class="hint">今日</span></div>
+          <div class="panel-body">
+            <div class="table-wrap"><table id="cost-lang"></table></div>
+            <div style="margin-top:16px" id="cost-trend"></div>
+            <p style="font-size:11px;color:var(--color-muted-foreground);margin-top:8px">成本 = Σ(tokens_in×单价_in + tokens_out×单价_out) ÷ 询盘条数；嵌入与重排在本地 CPU 运行，不计入 API 费用。</p>
+          </div>
+        </section>
+      </div>
+
+      <!-- 质量分层 -->
+        <section class="card">
+          <div class="panel-hd"><h2>质量分层（先分层后聚合）</h2><span class="hint">自建询盘语料层</span></div>
+          <div class="panel-body table-wrap">
+            <table id="quality-table"></table>
+            <p style="font-size:11px;color:var(--color-muted-foreground);margin-top:12px">
+              公开检索基准（MIRACL / MLDR / Mr. TyDi / mMARCO / MKQA / MLQARetrieval）只作"检索管线体检"，成绩单独成表，<b>不并入本表总分</b>。
+            </p>
+          </div>
+        </section>
+
+      <div class="grid-2">
+        <!-- 风险事件 -->
+        <section class="card">
+          <div class="panel-hd"><h2>风险与降级事件</h2><span class="hint">今日</span></div>
+          <div class="panel-body table-wrap">
+            <table id="risk-events"></table>
+          </div>
+        </section>
+
+        <!-- 闸门 -->
+        <section class="card">
+        <div class="panel-hd"><h2>人审闸门运行情况</h2><span class="hint">11 条闸门 · 4 条强制</span></div>
+        <div class="panel-body table-wrap">
+          <table id="gate-table"></table>
+        </div>
+      </section>
+      </div>
+
+    </div>
+  </main>
+</div>
+<div class="toast-host" aria-live="polite"></div>
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

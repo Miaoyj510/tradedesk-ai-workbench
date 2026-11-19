@@ -1,0 +1,48 @@
+# TradeDesk-AI —— 本地依赖编排（Windows 11 + Docker Desktop 29.x / WSL2 后端）
+#
+# ⚠ 本机现状：Docker Hub 拉取被网络阻断（registry-1.docker.io 不可达），
+#   因此使用本机**已缓存**的 postgres:16-alpine 与 redis:7-alpine 镜像。
+#   pgvector 扩展在 S4 阶段通过本地构建镜像接入（见 docker/pgvector/Dockerfile）。
+#
+# 启动：docker compose up -d db redis
+# 停止：docker compose down
+name: tradedesk
+
+services:
+  db:
+    image: postgres:16-alpine          # 本机已缓存；S4 起替换为本地构建的 pgvector 镜像
+    container_name: tradedesk-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tradedesk
+      POSTGRES_PASSWORD: tradedesk_local_dev
+      POSTGRES_DB: tradedesk
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    ports:
+      - "5433:5432"                    # 5433 对外，避免与本机其它项目常用端口冲突
+    volumes:
+      - tradedesk_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradedesk -d tradedesk"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine              # 本机已缓存
+    container_name: tradedesk-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6380:6379"
+    volumes:
+      - tradedesk_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  tradedesk_pgdata:
+  tradedesk_redisdata:

@@ -1,0 +1,7 @@
+pydantic>=2.7,<3
+pytest>=8
+
+# S2 起需要
+# fastapi>=0.115
+# uvicorn>=0.34
+# httpx>=0.28
