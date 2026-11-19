@@ -177,10 +177,15 @@ try {
   $ls = @()
   $pyApi = Get-PythonExe
   $env:TRADEDESK_GITHUB_TOKEN = $token
-  $raw = & $pyApi (Join-Path $Root "scripts\remote_refs.py") --owner $Owner --repo $Repo
-  if ($LASTEXITCODE -eq 0 -and $raw) {
-    $ls = @($raw -split "`r?`n" | Where-Object { $_ -match "refs/heads/" })
-    $remote = @($ls | ForEach-Object { ($_ -split "refs/heads/")[1] })
+    # 用文件重定向读取（与 git 输出同一套路，避免脚本上下文里直接捕获 stdout 拿到空）
+    $refFile = Join-Path $env:TEMP ("td_refs_{0}.txt" -f (Get-Random))
+    & $pyApi (Join-Path $Root "scripts\remote_refs.py") --owner $Owner --repo $Repo *> $refFile
+    if (Test-Path -LiteralPath $refFile) {
+      $ls = @(Get-Content -LiteralPath $refFile -ErrorAction SilentlyContinue |
+              Where-Object { $_ -match "refs/heads/" })
+      $remote = @($ls | ForEach-Object { ($_ -split "refs/heads/")[1].Trim() })
+      Remove-Item -LiteralPath $refFile -Force -ErrorAction SilentlyContinue
+    }
   }
   Write-Host "  远端现有分支：$($remote -join ', ')" -ForegroundColor Green
   $missing = @($Branches | Where-Object { $remote -notcontains $_ })
