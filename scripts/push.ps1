@@ -72,6 +72,11 @@ $git = Get-GitExe
 $py = Get-PythonExe
 $cmdExe = "$env:SystemRoot\System32\cmd.exe"
 
+# 通过 powershell.exe -File 传参时，"main,agent-a" 是一个整串，这里拆开
+if ($Branches.Count -eq 1 -and $Branches[0] -match ",") {
+  $Branches = @($Branches[0] -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+}
+
 if (-not $Branches) {
   $cur = (& $git rev-parse --abbrev-ref HEAD).Trim()
   if ($cur -eq "HEAD") { throw "当前处于 detached HEAD，请用 -Branches 指定分支" }
