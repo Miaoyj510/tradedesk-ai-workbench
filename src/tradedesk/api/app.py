@@ -82,6 +82,37 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
             "time": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         }
 
+    # ------------------------------------------------------------ 知识库检索
+    @app.get("/kb/search")
+    def kb_search(q: str, lang: str = "zh", country: str = "",
+                  sku: str = "", top_k: int = 5) -> Dict[str, Any]:
+        """检索管线查询（演示与联调用）：返回命中、引用标识、命中原因与时效标记。"""
+        from ..retrieval.base import SearchQuery
+        query = SearchQuery(text=q, lang=lang, buyer_country=country, sku=sku, top_k=top_k)
+        hits = app.state.ctx.retriever.search(query)
+        return {
+            "query": q, "country": country, "kb_version": app.state.ctx.kb_version,
+            "hits": [
+                {
+                    "chunk_id": h.chunk.chunk_id,
+                    "doc_id": h.chunk.doc_id,
+                    "doc_type": h.chunk.doc_type,
+                    "title": h.chunk.title,
+                    "citation_id": h.citation_id,
+                    "identifiers": h.chunk.identifiers,
+                    "score": h.score,
+                    "channel": h.channel,
+                    "reasons": h.reasons,
+                    "expired": h.expired,
+                    "not_yet_effective": h.not_yet_effective,
+                    "effective_from": h.chunk.effective_from.isoformat() if h.chunk.effective_from else None,
+                    "effective_to": h.chunk.effective_to.isoformat() if h.chunk.effective_to else None,
+                    "valid_until": h.chunk.valid_until.isoformat() if h.chunk.valid_until else None,
+                }
+                for h in hits
+            ],
+        }
+
     # ------------------------------------------------------------ 角色注册表
     @app.get("/agents")
     def agents() -> List[Dict[str, Any]]:

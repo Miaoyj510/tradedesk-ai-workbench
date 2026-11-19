@@ -20,6 +20,22 @@ import argparse
 import json
 import os
 import sys
+
+
+def _setup_stdout() -> None:
+    """自适应输出编码：tty 用控制台原生编码，非 tty 用 UTF-8，无法编码的字符用 replace 兜底。"""
+    if os.environ.get("PYTHONIOENCODING"):
+        return
+    try:
+        if sys.stdout.isatty():
+            sys.stdout.reconfigure(errors="replace")
+        else:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+_setup_stdout()
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 

@@ -62,6 +62,30 @@ class Citation(BaseModel):
     expired: bool = False
 
 
+class KBChunk(BaseModel):
+    """知识库的一个可检索、可引用单元（PRD 9.1 / 9.3）。
+
+    每块都必须带**可回指标识**（证书编号 / 条款号 / SKU / 名单条目 ID）与**时效字段**
+    （生效 / 废止 / 有效期）—— 没有标识就没法引用，没有时效就会输出过期要求。
+    """
+
+    chunk_id: str
+    doc_id: str
+    doc_type: str                 # 产品条目 / 证书 / 法规条款 / 名单条目 / 术语表 / 话术
+    title: str = ""
+    text: str = ""
+    lang: str = "zh"
+    identifiers: Dict[str, str] = Field(default_factory=dict)   # {"cert_no": ...} / {"clause_no": ...}
+    countries: List[str] = Field(default_factory=list)          # 适用国别（空 = 通用）
+    hs_codes: List[str] = Field(default_factory=list)
+    tags: List[str] = Field(default_factory=list)
+    effective_from: Optional[datetime] = None
+    effective_to: Optional[datetime] = None
+    valid_until: Optional[datetime] = None
+    kb_version: str = ""
+    extra: Dict[str, Any] = Field(default_factory=dict)
+
+
 class Handoff(BaseModel):
     """Agent 间交接（PRD 8.4 的必填字段在 Agent 间传递的载体）。
 
