@@ -76,7 +76,35 @@
 | 6.4 | 容器内 `PYTHONPATH=/app/src`、端口 **8080**、`PYTHONIOENCODING=utf-8` | Dockerfile `ENV` | 配置默认值与之一致 |
 | 6.5 | SQLite 路径按**项目根**解析（不是当前工作目录）—— 容器里是 `/app/data/tradedesk.db` | config.py | 两个 worktree 不共用同一个库文件 |
 
-## 二、审核方会怎么验
+## 二、S2 会踩到的两个既有缺口（审核 R1/R8 发现，实现时必须一起处理）
+
+### 缺口 A：闸门令牌没有绑定"动作"（P0，安全）
+
+现在的 `GateToken` 只绑了 `thread_id` + `draft_id` + `gates`，**没有说这张令牌授权的是哪个写操作**。
+而 `consume(token, thread_id, draft_id)` 只校验这三项 → 一张为"发送价格草稿"签发的令牌，
+理论上也能被拿去推进阶段、或者调用别的写接口。
+
+PRD 8.9「工具默认只读」要求的是"写工具必须**绑定**闸门 token"，绑定到具体动作才是那条要求的落点。
+
+**建议的最小改法**：令牌加一个 `action` 字段（如 `send_draft` / `advance_stage`），
+签发时写死，消费时校验；或退一步，接口层校验令牌的 `gates` 覆盖该动作所要求的闸门
+（发送价格要 GATE-01、推进阶段要 GATE-04……）。
+
+> 这条不补，"未过闸门的写操作 = 0"（FR-ORC-09）就有漏洞可钻。
+
+### 缺口 B：客户档案字段不够 Handoff 用
+
+PRD 8.3 的客户档案有 7 类字段：基础识别 / `contact_history_digest` / `known_requirements` /
+`risk_flags` / `preference_profile` / `linked_threads` / `last_seen_at`。
+
+当前 `CustomerProfile` 有 `contact`（联系人姓名），但**没有 `contact_history_digest`，
+也没有 `preference_profile`**。
+
+而 PRD 8.4 要求 Handoff 必填 `buyer_profile_digest` = "公司、国别、行业、**历史要点**" ——
+"历史要点"正好落在 `contact_history_digest` 上，"话术偏好"落在 `preference_profile` 上。
+S2 要做 Handoff 校验，这两个字段得先补齐，否则 `buyer_profile_digest` 拼不出 PRD 要求的内容。
+
+## 三、审核方会怎么验
 
 1. **不只跑 `verify_s2.py`**：审核方自己按上表重写一遍断言，重点是上表没有、
    但实现里容易漏的边界（幂等、并发、越权）。
@@ -88,7 +116,7 @@
 5. **PRD 偏离**：实现与 PRD 表述不一致时，以 PRD 为准；要改就两个 agent 一起确认
    （WORKFLOW.md 第 7 节）。
 
-## 三、已修的地雷（审核 R1/R2，避免重复踩）
+## 四、已修的地雷（避免重复踩）
 
 | 编号 | 问题 | 状态 |
 | --- | --- | --- |
@@ -99,7 +127,7 @@
 | R2-1 | 存储层并发写入丢数据、审计哈希链会断 | 已修（agent-b） |
 | R2-2 | SQLite 单连接跨线程共用会踩事务 | 已修（agent-b，线程局部连接 + 写锁） |
 
-## 四、待定项（要实现 agent / 用户拍板）
+## 五、待定项（要实现 agent / 用户拍板）
 
 1. **Handoff 校验严格程度**：PRD 只说"缺任一必填字段即拒绝"。
    `evidence_refs` / `committed_items` 允许空列表，还是必须非空？
