@@ -37,6 +37,47 @@ GIT = r"C:\Users\DELL\.cache\codex-runtimes\codex-primary-runtime\dependencies\n
 API = "https://api.github.com"
 
 
+def _setup_stdout() -> None:
+    """自适应输出编码（与 scripts/verify_s1.py 同一套做法）。
+
+    本脚本会打印 ✓ / ✗，这两个字符**不在 GBK 码表里** —— 中文 Windows 的
+    默认控制台（CP936）编码它们时会抛 UnicodeEncodeError，把真正要报的错
+    （比如 401 Bad credentials）盖掉。所以：
+    - 交互式控制台（tty）：沿用控制台原生编码，只放宽字符错误处理；
+    - 被重定向 / 被工具捕获（非 tty）：改用 UTF-8。
+    外部已设 PYTHONIOENCODING 时以环境变量为准。
+    """
+    if os.environ.get("PYTHONIOENCODING"):
+        return
+    try:
+        if sys.stdout.isatty():
+            sys.stdout.reconfigure(errors="replace")
+        else:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+
+_setup_stdout()
+
+
+def _marks() -> tuple:
+    """挑一组当前控制台能编码的标记字符。
+
+    ✓ / ✗ 不在 GBK 码表里；中文 Windows 的默认控制台（CP936）编码它们会抛
+    UnicodeEncodeError，把真正要报的错盖掉。控制台编不了就退回 ASCII。
+    """
+    enc = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        "✓✗".encode(enc)
+    except Exception:
+        return ("[OK]", "[FAIL]")
+    return ("✓", "✗")
+
+
+OK_MARK, FAIL_MARK = _marks()
+
+
 # ---------------------------------------------------------------- git 辅助
 def git(*args: str, binary: bool = False):
     p = subprocess.run([GIT, *args], cwd=str(ROOT), capture_output=True)
@@ -185,7 +226,7 @@ class GitHubAPI:
         self._req("PUT", f"/repos/{self.owner}/{self.repo}/contents/README.md",
                   {"message": "chore: initialize repository (TradeDesk-AI publisher)",
                    "content": content})
-        print("    ✓ 初始 commit 已建立")
+        print(f"    {OK_MARK} 初始 commit 已建立")
         return True
 
     # ---- 分支引用 ----
@@ -229,7 +270,7 @@ def main() -> int:
     try:
         return _push_all(api, args)
     except RuntimeError as e:
-        print(f"\n✗ 推送失败：{e}")
+        print(f"\n{FAIL_MARK} 推送失败：{e}")
         return 1
     except KeyboardInterrupt:
         print("\n已中断。")
@@ -264,13 +305,13 @@ def _push_all(api, args) -> int:
             if new_sha != last:
                 api.set_ref(branch, new_sha)
                 last = new_sha
-            print(f"    ✓ {c[:10]} {git('log', '-1', '--format=%s', c)}")
+            print(f"    {OK_MARK} {c[:10]} {git('log', '-1', '--format=%s', c)}")
 
         # 核验
         ref2 = api.get_ref(branch)
         remote_now = ref2["object"]["sha"] if ref2 else None
         local_tip = git("rev-parse", branch).strip()
-        same = "✓ 一致" if remote_now == local_tip else f"✗ 不一致（远端 {remote_now} / 本地 {local_tip}）"
+        same = f"{OK_MARK} 一致" if remote_now == local_tip else f"{FAIL_MARK} 不一致（远端 {remote_now} / 本地 {local_tip}）"
         print(f"  → 远端分支 {branch}：{same}")
 
     print("\n完成。可用下面的命令复核：")

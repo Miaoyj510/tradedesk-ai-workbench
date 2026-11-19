@@ -30,6 +30,10 @@ def _load_dotenv(path: Path) -> Dict[str, str]:
 class Config:
     # 存储
     db_path: str = "data/tradedesk.db"
+    # PostgreSQL DSN；为空 = 用 SQLite（本地零依赖）。生产形态填这个。
+    database_url: str = ""
+    # 队列 / 缓存（S2 起使用）
+    redis_url: str = ""
     # 大模型（云 API Key 方式；S1 阶段不调用，仅登记配置）
     llm_provider: str = "minimax"
     llm_model: str = "MiniMax-Text-01"
@@ -62,6 +66,8 @@ class Config:
 
         cfg = cls(
             db_path=get("TRADEDESK_DB_PATH", "data/tradedesk.db"),
+            database_url=get("TRADEDESK_DATABASE_URL", ""),
+            redis_url=get("TRADEDESK_REDIS_URL", ""),
             llm_provider=get("TRADEDESK_LLM_PROVIDER", "minimax"),
             llm_model=get("TRADEDESK_LLM_MODEL", "MiniMax-Text-01"),
             llm_api_key=get("MINIMAX_API_KEY", ""),
@@ -79,6 +85,11 @@ class Config:
             port=int(get("TRADEDESK_PORT", "8080")),
             env=get("TRADEDESK_ENV", "dev"),
         )
+        # SQLite 路径按**项目根**解析成绝对路径，而不是相对当前工作目录。
+        # 两个 agent 各有各的 worktree，相对路径会让两个进程共用同一个库文件
+        # —— 跟"两库隔离"直接冲突（WORKFLOW.md 第 4 节）。
+        if cfg.db_path and not os.path.isabs(cfg.db_path):
+            cfg.db_path = str((root / cfg.db_path).resolve())
         return cfg
 
 

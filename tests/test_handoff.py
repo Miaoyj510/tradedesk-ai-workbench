@@ -13,7 +13,8 @@ from tradedesk.runtime.handoff import (
 
 def _kwargs(**kw):
     base = dict(
-        from_agent="sentinel.risk", to_agent="inquiry.reply", reason="风控通过",
+        from_agent="sentinel.risk", to_agent="inquiry.reply",
+        thread_id="T-T1", buyer_id="BY-1", handoff_reason="风控通过",
         buyer_profile_digest="Brasil Distribuidora Ltda（巴西）",
         committed_items=[], open_questions=[], deadlines=[],
         stage=Stage.INQUIRY, evidence_refs=["CN-1"], risk_level=RiskLevel.LOW,
@@ -24,7 +25,8 @@ def _kwargs(**kw):
 
 
 def test_required_fields_count():
-    assert len(REQUIRED_FIELDS) == 13
+    """PRD 8.4 的必填项是 15 个字段（表里 13 行，其中两行各含 2 个字段）。"""
+    assert len(REQUIRED_FIELDS) == 15
 
 
 def test_valid_handoff_passes():
@@ -32,7 +34,8 @@ def test_valid_handoff_passes():
     assert validate_handoff(h) == []
 
 
-@pytest.mark.parametrize("field", ["idempotency_key", "buyer_profile_digest", "pending_decision", "reason"])
+@pytest.mark.parametrize("field", ["idempotency_key", "buyer_profile_digest", "pending_decision",
+                                     "handoff_reason", "thread_id", "buyer_id"])
 def test_blank_string_field_is_rejected(field):
     with pytest.raises(HandoffRejected) as e:
         build_handoff(**_kwargs(**{field: "  "}))

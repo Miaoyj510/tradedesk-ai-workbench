@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tradedesk.domain.enums import Actor, EventType, Language
+from tradedesk.domain.enums import Actor, EventType, Language, Stage
 from tradedesk.domain.models import ThreadEvent
 from tradedesk.domain.state_machine import build_thread
 from tradedesk.store.sqlite_store import SqliteStateStore
@@ -62,3 +62,34 @@ def test_resume_after_restart(tmpdir_local):
     got = again.get_thread("T-5")
     assert got is not None
     assert (datetime.now(timezone.utc) - got.last_activity_at).days >= 5
+
+
+def test_filter_by_stage_accepts_enum_or_string(tmpdir_local):
+    """看板按阶段筛选（FR-ORC-10）必须能直接传枚举。
+
+    ⚠ str(Stage.QUOTING) 是 "Stage.QUOTING" 而不是 "QUOTING"（Python 3.11 起），
+    拿它去拼 WHERE 会一条都查不出来 —— 而且不报错，是静默返回空列表。
+    """
+    store = SqliteStateStore(str(tmpdir_local / "f.db"))
+    quoting = build_thread("T-F1", "BY-1", Language.EN)
+    quoting.stage = Stage.QUOTING
+    store.create_thread(quoting)
+    inquiry = build_thread("T-F2", "BY-2", Language.AR)
+    store.create_thread(inquiry)
+
+    assert len(store.list_threads(stage=Stage.QUOTING)) == 1
+    assert len(store.list_threads(stage="QUOTING")) == 1
+    assert len(store.list_threads(stage=Stage.INQUIRY)) == 1
+    assert len(store.list_threads(stage=Stage.CLOSED)) == 0
+
+
+def test_filter_by_language_and_buyer(tmpdir_local):
+    store = SqliteStateStore(str(tmpdir_local / "g.db"))
+    store.create_thread(build_thread("T-G1", "BY-1", Language.ES))
+    store.create_thread(build_thread("T-G2", "BY-1", Language.EN))
+    store.create_thread(build_thread("T-G3", "BY-2", Language.ES))
+
+    assert len(store.list_threads(language=Language.ES)) == 2
+    assert len(store.list_threads(language=Language.EN)) == 1
+    assert len(store.list_threads(buyer_id="BY-1")) == 2
+    assert len(store.list_threads(buyer_id="BY-1", language=Language.ES)) == 1

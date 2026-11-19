@@ -41,6 +41,25 @@ def _hit(patterns, text: str) -> bool:
     return any(p.search(text or "") for p in patterns)
 
 
+# Prompt 注入特征（PRD 8.9 / FR-EVA-07）：买家消息一律当数据，不得当指令
+INJECTION_PATTERNS = [
+    re.compile(r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions", re.I),
+    re.compile(r"(?:忽略|无视)(上面|以上|之前|前面)", re.I),
+    re.compile(r"(?:你现在是|you\s+are\s+now)\s+(?:a|an|the)\s+\w+", re.I),
+    re.compile(r"(?:打印|输出|展示|show|print|reveal|list)\D{0,12}(?:system\s?prompt|系统提示词|提示词)", re.I),
+    re.compile(r"(?:忽略|跳过)\D{0,8}(?:所有)?(?:规则|限制|闸门|审核|guard)", re.I),
+]
+
+
+def detect_injection(text: str) -> Optional[str]:
+    """检测买家消息里的指令型注入；返回命中的特征描述，没有则 None。"""
+    for p in INJECTION_PATTERNS:
+        m = p.search(text or "")
+        if m:
+            return m.group(0)
+    return None
+
+
 # ---- 金额抽取（GATE-11）----
 # 币种标记。金额可能写在数字**前面**（USD 8000），也可能写在**后面**（8000 USD），
 # 两种写法都必须认，否则阈值闸门会被"把币种挪到数字后面"直接绕过。
@@ -88,6 +107,42 @@ def _amount_from_draft(draft: Optional[Draft]) -> float:
         if v is not None:
             values.append(v)
     return max(values) if values else 0.0
+
+
+# 驳回原因分类（PRD FR-HUM-07：≥ 5 类），驳回时必须选一类，回灌给 Agent
+REJECT_REASONS: List[str] = [
+    "价格不符",
+    "交期不可接受",
+    "规格/认证不符",
+    "措辞不合适",
+    "证据不足需补充",
+    "合规存疑",
+    "其他（已备注）",
+]
+
+
+def classify_reject_reason(reason: str) -> str:
+    """把业务员填的原因归到一类（用于统计与回灌）。"""
+    text = (reason or "").strip()
+    if not text:
+        raise ValueError("驳回必须带原因（FR-HUM-06）")
+    for cat in REJECT_REASONS:
+        if cat != "其他（已备注）" and cat in text:
+            return cat
+    if "其他" in text:
+        return "其他（已备注）"
+    # 没命中预设分类时按关键词兜底
+    if any(k in text for k in ("价格", "价", "报价", "折扣")):
+        return "价格不符"
+    if any(k in text for k in ("交期", "发货", "排产")):
+        return "交期不可接受"
+    if any(k in text for k in ("规格", "认证", "证书", "型号")):
+        return "规格/认证不符"
+    if any(k in text for k in ("合规", "名单", "制裁", "管制")):
+        return "合规存疑"
+    if any(k in text for k in ("证据", "引用", "资料")):
+        return "证据不足需补充"
+    return "其他（已备注）"
 
 
 class GateRule:
@@ -161,11 +216,13 @@ class GateTokenService:
         self.store = store
         self.ttl_seconds = ttl_seconds
 
-    def issue(self, thread_id: str, draft_id: str, gates: List[GateId]) -> GateToken:
+    def issue(self, thread_id: str, draft_id: str, gates: List[GateId],
+              action: str = "") -> GateToken:
         token = GateToken(
             token=secrets.token_urlsafe(24),
             thread_id=thread_id,
             draft_id=draft_id,
+            action=action,
             gates=list(gates),
             issued_at=datetime.now(timezone.utc),
             expires_at=datetime.now(timezone.utc) + timedelta(seconds=self.ttl_seconds),
@@ -173,10 +230,19 @@ class GateTokenService:
         self.store.issue_gate_token(token)
         self.store.append_audit("system", "gate.token.issued", thread_id,
                                 {"token": token.token[:8] + "…", "draft_id": draft_id,
-                                 "gates": [g.value for g in gates]})
+                                 "action": action, "gates": [g.value for g in gates]})
         return token
 
-    def consume(self, token_id: str, thread_id: str, draft_id: str) -> bool:
+    def consume(self, token_id: str, thread_id: str, draft_id: str,
+                action: str = "") -> bool:
+        """消费令牌。**动作必须匹配**：为"发送"签发的令牌不能拿去推进阶段。"""
+        token = self.store.get_gate_token(token_id)
+        if token is not None and action and token.action and token.action != action:
+            self.store.append_audit(
+                "system", "write.rejected", thread_id,
+                {"reason": "闸门令牌动作不匹配", "token_action": token.action,
+                 "required_action": action})
+            return False
         ok = self.store.consume_gate_token(token_id, thread_id, draft_id)
         self.store.append_audit(
             "human" if ok else "system",

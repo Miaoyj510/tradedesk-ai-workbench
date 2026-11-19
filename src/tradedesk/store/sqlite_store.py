@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import audit_hash, canonical_ts
+from .base import audit_hash, canonical_ts, enum_val
 from ..domain.models import (
     AuditEntry,
     CustomerProfile,
@@ -78,17 +78,13 @@ CREATE TABLE IF NOT EXISTS gate_tokens (
     token       TEXT PRIMARY KEY,
     thread_id   TEXT NOT NULL,
     draft_id    TEXT NOT NULL,
+      action      TEXT NOT NULL DEFAULT '',
     gates       TEXT NOT NULL,
     issued_at   TEXT NOT NULL,
     expires_at  TEXT NOT NULL,
     consumed_at TEXT
 );
 """
-
-
-def _enum_val(x: Any) -> str:
-    "兼容枚举与字符串两种写法，避免调用方直接赋值字符串导致崩溃。"
-    return x.value if hasattr(x, "value") else str(x)
 
 
 def _dumps(obj: Any) -> str:
@@ -126,6 +122,11 @@ class SqliteStateStore:
     def _new_conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        # autocommit：默认隔离级别下，一次 SELECT 会开着一个读事务直到 commit；
+        # 之后同一连接想写（"升级事务"）若此时别的连接正在写，SQLite 会**立刻**
+        # 返回 SQLITE_BUSY（busy_timeout 对这种死锁升级无效）。
+        # 改成 autocommit 后每条语句自成一个事务，跨线程并发写只靠 busy_timeout 排队。
+        conn.isolation_level = None
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
@@ -149,6 +150,10 @@ class SqliteStateStore:
     # ---------- 基础设施 ----------
     def init_schema(self) -> None:
         self._conn.executescript(DDL)
+        # 轻量迁移：老库补列（CREATE TABLE IF NOT EXISTS 不会给已存在的表加列）
+        _cols = {r[1] for r in self._conn.execute("PRAGMA table_info(gate_tokens)")}
+        if "action" not in _cols:
+            self._conn.execute("ALTER TABLE gate_tokens ADD COLUMN action TEXT NOT NULL DEFAULT ''")
         cur = self._conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'")
         row = cur.fetchone()
         if row is None:
@@ -220,7 +225,7 @@ class SqliteStateStore:
             "INSERT INTO threads(thread_id, buyer_id, stage, language, version, payload, updated_at) "
             "VALUES(?,?,?,?,?,?,?)",
             (
-                thread.thread_id, thread.buyer_id, _enum_val(thread.stage), _enum_val(thread.language),
+                thread.thread_id, thread.buyer_id, enum_val(thread.stage), enum_val(thread.language),
                 thread.version, _dumps(thread.model_dump(mode="json")),
                 datetime.now(timezone.utc).isoformat(),
             ),
@@ -239,7 +244,7 @@ class SqliteStateStore:
             cur = self._conn.execute(
                 "UPDATE threads SET stage=?, language=?, version=?, payload=?, updated_at=? WHERE thread_id=? AND version=?",
                 (
-                    _enum_val(thread.stage), _enum_val(thread.language), thread.version,
+                    enum_val(thread.stage), enum_val(thread.language), thread.version,
                     _dumps(thread.model_dump(mode="json")),
                     datetime.now(timezone.utc).isoformat(), thread.thread_id, thread.version - 1,
                 ),
@@ -256,7 +261,11 @@ class SqliteStateStore:
         sql = "SELECT payload FROM threads"
         clauses, params = [], []
         if "stage" in filters and filters["stage"]:
-            clauses.append("stage=?"); params.append(str(filters["stage"]))
+            # enum_val：不能写 str(filters["stage"]) —— str(Stage.QUOTING) 是
+            # "Stage.QUOTING"，用它筛会一条都查不到（看板按阶段筛选会静默返回空）
+            clauses.append("stage=?"); params.append(enum_val(filters["stage"]))
+        if "language" in filters and filters["language"]:
+            clauses.append("language=?"); params.append(enum_val(filters["language"]))
         if "buyer_id" in filters and filters["buyer_id"]:
             clauses.append("buyer_id=?"); params.append(filters["buyer_id"])
         if clauses:
@@ -342,10 +351,10 @@ class SqliteStateStore:
     def issue_gate_token(self, token: GateToken) -> None:
         with self._write_lock:
             self._conn.execute(
-                "INSERT INTO gate_tokens(token, thread_id, draft_id, gates, issued_at, expires_at, consumed_at) "
-                "VALUES(?,?,?,?,?,?,?)",
+                "INSERT INTO gate_tokens(token, thread_id, draft_id, action, gates, issued_at, expires_at, consumed_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
                 (
-                    token.token, token.thread_id, token.draft_id,
+                    token.token, token.thread_id, token.draft_id, token.action,
                     _dumps([g.value for g in token.gates]),
                     token.issued_at.isoformat(), token.expires_at.isoformat(),
                     token.consumed_at.isoformat() if token.consumed_at else None,
@@ -357,8 +366,10 @@ class SqliteStateStore:
         row = self._conn.execute("SELECT * FROM gate_tokens WHERE token=?", (token_id,)).fetchone()
         if not row:
             return None
+        keys = row.keys()
         return GateToken(
             token=row["token"], thread_id=row["thread_id"], draft_id=row["draft_id"],
+            action=row["action"] if "action" in keys else "",
             gates=json.loads(row["gates"]),
             issued_at=datetime.fromisoformat(row["issued_at"]),
             expires_at=datetime.fromisoformat(row["expires_at"]),
