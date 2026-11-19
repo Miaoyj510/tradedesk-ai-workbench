@@ -168,6 +168,8 @@ class GitHubAPI:
                 ) from e
             if "HTTP 404" in msg:
                 return None      # 远端还没有这个分支
+            if "HTTP 409" in msg and "empty" in msg.lower():
+                return None      # 空仓库：GitHub 返回 409 "Git Repository is empty."
             raise
 
     def set_ref(self, branch: str, sha: str, force: bool = True) -> None:

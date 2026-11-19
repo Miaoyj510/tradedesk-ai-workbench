@@ -106,7 +106,12 @@ switch ($Command.ToLower()) {
     Write-Host "==============================================" -ForegroundColor Cyan
     Write-Host "全部检查通过。项目状态良好。" -ForegroundColor Green
     exit 0
-  }  "clean" {
+  }  "push" {
+    Write-Host "[push] 推送当前分支到 GitHub（git 优先，失败自动切 API）" -ForegroundColor Cyan
+    & (Join-Path $Root "scripts\push.ps1")
+    exit $LASTEXITCODE
+  }
+  "clean" {
     Write-Host "[clean] 清理生成物（验证临时文件 / 缓存 / __pycache__）..." -ForegroundColor Cyan
     $targets = @(
       (Join-Path $Root "data\tmp"),
@@ -143,6 +148,7 @@ TradeDesk-AI 开发脚本（项目根：$Root）
   test     跑 pytest
   status   查看容器与端口
   check    交付前自检：语法 + 双后端验证 + pytest
+  push     推送当前分支到 GitHub（git 优先，失败自动切 API）
   clean    清理验证临时文件、缓存与 __pycache__
   # 说明：verify 跑完会自动清理临时物，clean 只是手动扫尾
   shell    进入项目 Python 交互环境

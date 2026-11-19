@@ -130,11 +130,10 @@ try {
   else { & $git remote add $Remote $repoUrl }
   Write-Host "  remote $Remote -> $repoUrl"
 
-  Write-Host "=== 5/5 通过 GitHub API 推送 main / agent-a / agent-b ===" -ForegroundColor Cyan
-  $py = Get-PythonExe
+  Write-Host "=== 5/5 推送 main / agent-a / agent-b（git 优先，失败自动切 API）===" -ForegroundColor Cyan
   $env:TRADEDESK_GITHUB_TOKEN = $token
   $ErrorActionPreference = "Continue"
-  & $py (Join-Path $Root "scripts\push_via_api.py") --owner $Owner --repo $RepoName --branches main agent-a agent-b
+  & (Join-Path $Root "scripts\push.ps1") -Owner $Owner -Repo $RepoName -Branches @("main", "agent-a", "agent-b")
   $pushCode = $LASTEXITCODE
   $env:TRADEDESK_GITHUB_TOKEN = $null
   if ($pushCode -ne 0) { throw "推送失败（exit=$pushCode）" }
