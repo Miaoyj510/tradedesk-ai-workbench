@@ -135,6 +135,13 @@ switch ($Command.ToLower()) {
     else { & $py (Join-Path $Root "scripts\audit_s2.py") }
     exit $LASTEXITCODE
   }
+  "audit3" {
+    $py = Get-PythonExe
+    Write-Host "[audit3] 运行 S3 独立审核（审核 agent 的断言，非自证）" -ForegroundColor Cyan
+    if ($Dsn) { & $py (Join-Path $Root "scripts/audit_s3.py") --dsn $Dsn }
+    else { & $py (Join-Path $Root "scripts/audit_s3.py") }
+    exit $LASTEXITCODE
+  }
   "serve" {
     Write-Host "[serve] 启动 HTTP 接口（http://127.0.0.1:8080/docs）" -ForegroundColor Cyan
     $py = Get-PythonExe
@@ -184,6 +191,7 @@ TradeDesk-AI 开发脚本（项目根：$Root）
   status   查看容器与端口
   check    交付前自检：语法 + 双后端验证 + pytest
   audit    S2 独立审核（审核 agent 断言，见 docs/S2-AUDIT-R9.md；R9 缺陷修完前为红）
+  audit3   S3 独立审核（审核 agent 断言，见 docs/S3-AUDIT-R11.md；R11 缺陷修完前为红）
   serve    启动 HTTP 接口（FastAPI，/docs 有接口文档）
   push     推送当前分支到 GitHub（git 优先，失败自动切 API）
   clean    清理验证临时文件、缓存与 __pycache__
