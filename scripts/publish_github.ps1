@@ -52,6 +52,7 @@ function Get-PythonExe {
 }
 
 $git = Get-GitExe
+$py = Get-PythonExe
 $vis = "私有"
 if ($Public) { $vis = "公开" }
 
