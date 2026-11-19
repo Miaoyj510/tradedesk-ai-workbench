@@ -101,17 +101,38 @@ def test_send_before_signoff_is_rejected(client):
     assert r.json()["detail"]["code"] == "not_signed_off"
 
 
+def _advance_token(client, thread_id, draft_id, action="advance_stage"):
+    tok = client.post(f"/threads/{thread_id}/gate-token",
+                      json={"draft_id": draft_id, "action": action}).json()["token"]
+    return tok
+
+
+def test_advance_requires_gate_token(client):
+    """推进阶段是写操作：没有闸门令牌必须 403（PRD 8.9 / FR-ORC-09）。"""
+    d = _inbound(client).json()
+    r = client.post(f"/threads/{d['thread_id']}/advance", json={"to_stage": "QUOTING"})
+    assert r.status_code == 403
+
+
 def test_advance_requires_contract_version(client):
     d = _inbound(client).json()
-    tid = d["thread_id"]
-    assert client.post(f"/threads/{tid}/advance", json={"to_stage": "QUOTING"}).status_code == 200
-    r = client.post(f"/threads/{tid}/advance", json={"to_stage": "ORDERED"})
-    assert r.status_code == 409
+    tid, did = d["thread_id"], d["draft_id"]
+    tok = _advance_token(client, tid, did)
+    r = client.post(f"/threads/{tid}/advance", json={"to_stage": "QUOTING"},
+                    headers={"X-Gate-Token": tok})
+    assert r.status_code == 200
+    tok2 = _advance_token(client, tid, did)
+    r2 = client.post(f"/threads/{tid}/advance", json={"to_stage": "ORDERED"},
+                     headers={"X-Gate-Token": tok2})
+    assert r2.status_code == 409
 
 
 def test_unknown_stage_is_400(client):
     d = _inbound(client).json()
-    r = client.post(f"/threads/{d['thread_id']}/advance", json={"to_stage": "NOPE"})
+    tid, did = d["thread_id"], d["draft_id"]
+    tok = _advance_token(client, tid, did)
+    r = client.post(f"/threads/{tid}/advance", json={"to_stage": "NOPE"},
+                    headers={"X-Gate-Token": tok})
     assert r.status_code == 400
 
 

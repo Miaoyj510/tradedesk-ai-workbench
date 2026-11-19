@@ -47,6 +47,19 @@ def audit_hash(seq: int, actor: str, action: str, target: str, payload: Dict[str
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+class ConcurrentUpdate(RuntimeError):
+    """乐观锁冲突：另一个请求刚改过这条数据。
+
+    这是**正常业务状态**（对方先提交了），应该由上层映射成 409 并让调用方重读，
+    而不是变成 500。
+    """
+
+    def __init__(self, thread_id: str, current, submitted) -> None:
+        super().__init__(
+            f"并发冲突：thread {thread_id} 当前版本 {current}，提交版本 {submitted}")
+        self.thread_id = thread_id
+
+
 @runtime_checkable
 class StateStore(Protocol):
     """线程状态、客户档案、事件日志、审计、闸门令牌的持久化接口。"""

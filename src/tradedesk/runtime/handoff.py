@@ -34,6 +34,23 @@ REQUIRED_FIELDS: List[str] = [
 ]
 
 
+def _missing_from_error(exc: Exception, scope: dict) -> List[str]:
+    """把 pydantic/TypeError 的报错翻译成"缺哪些必填字段"。"""
+    msg = str(exc)
+    missing = [f for f in REQUIRED_FIELDS if f in msg]
+    if missing:
+        return missing
+    # pydantic 只报字段名时逐个探测
+    probe = []
+    for f in REQUIRED_FIELDS:
+        try:
+            if scope.get(f) in (None, ""):
+                probe.append(f)
+        except Exception:
+            pass
+    return probe or ["unknown"]
+
+
 class HandoffRejected(Exception):
     """交接被拒：缺必填字段。"""
 
@@ -82,8 +99,9 @@ def build_handoff(
     pending_decision: str,
 ) -> Handoff:
     """构造并校验 Handoff；不合格直接抛 HandoffRejected。"""
-    handoff = Handoff(
-        from_agent=from_agent,
+    try:
+        handoff = Handoff(
+            from_agent=from_agent,
         to_agent=to_agent,
         thread_id=thread_id,
         buyer_id=buyer_id,
@@ -96,9 +114,11 @@ def build_handoff(
         evidence_refs=list(evidence_refs),
         risk_level=risk_level,
         language=language,
-        idempotency_key=idempotency_key,
-        pending_decision=pending_decision,
-    )
+            idempotency_key=idempotency_key,
+            pending_decision=pending_decision,
+        )
+    except Exception as e:  # pydantic ValidationError / TypeError → 统一成 HandoffRejected
+        raise HandoffRejected(_missing_from_error(e, locals())) from e
     missing = validate_handoff(handoff)
     if missing:
         raise HandoffRejected(missing)

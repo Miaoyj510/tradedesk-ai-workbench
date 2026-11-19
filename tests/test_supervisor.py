@@ -64,7 +64,7 @@ def test_token_is_single_use(sup):
     r = sup.ingest(buyer_id="BY-BR-10", message="Quote 1000 pcs of M-77.",
                    language=Language.EN, company="Test Co", country="US")
     did = draft_id(r.thread_id)
-    token = sup.tokens.issue(r.thread_id, did, [])
+    token = sup.tokens.issue(r.thread_id, did, [], action="sign_off")
     assert sup.sign_off(thread_id=r.thread_id, draft_id=did, token=token.token,
                         action="approve")["ok"] is True
     assert sup.sign_off(thread_id=r.thread_id, draft_id=did, token=token.token,
@@ -75,7 +75,7 @@ def test_send_before_signoff_is_rejected(sup):
     r = sup.ingest(buyer_id="BY-BR-11", message="Quote 1000 pcs of M-77.",
                    language=Language.EN, company="Test Co", country="US")
     did = draft_id(r.thread_id)
-    token = sup.tokens.issue(r.thread_id, did, [])
+    token = sup.tokens.issue(r.thread_id, did, [], action="send_draft")
     out = sup.send(thread_id=r.thread_id, draft_id=did, token=token.token)
     assert out["ok"] is False and out["code"] == "not_signed_off"
 
@@ -83,8 +83,11 @@ def test_send_before_signoff_is_rejected(sup):
 def test_advance_rejects_missing_contract_version(sup):
     r = sup.ingest(buyer_id="BY-BR-12", message="Quote 1000 pcs of X-200.",
                    language=Language.EN, company="Test Co", country="US")
-    sup.advance(thread_id=r.thread_id, to_stage=Stage.QUOTING)
-    out = sup.advance(thread_id=r.thread_id, to_stage=Stage.ORDERED)
+    did = draft_id(r.thread_id)
+    tok = sup.tokens.issue(r.thread_id, did, [], action="advance_stage")
+    sup.advance(thread_id=r.thread_id, to_stage=Stage.QUOTING, token=tok.token)
+    tok2 = sup.tokens.issue(r.thread_id, did, [], action="advance_stage")
+    out = sup.advance(thread_id=r.thread_id, to_stage=Stage.ORDERED, token=tok2.token)
     assert out["ok"] is False and out["code"] == "invalid_transition"
 
 
