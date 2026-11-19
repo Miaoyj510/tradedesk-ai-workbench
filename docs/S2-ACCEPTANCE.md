@@ -64,6 +64,18 @@
 | 5.4 | 越权回复抑制：Sentinel 命中 high 时 Inquiry 输出被抑制（不是事后过滤） | PRD 8.9 / FR-EVA-07 | 命中场景外发内容 = 0 |
 | 5.5 | Prompt 注入命中 → 阻断 + GATE-07 + 转人工 + 安全记录 | PRD 8.9 | |
 
+### 6. 打包与运行形态（Dockerfile 已经把接口定死了）
+
+`Dockerfile` 是 S1 就写好的，它对 S2 提了硬要求，**实现必须对上，否则镜像起不来**：
+
+| # | 条款 | 出处 | 验证方式 |
+| --- | --- | --- | --- |
+| 6.1 | FastAPI 应用必须暴露在 **`tradedesk.api.app:app`**（模块路径 + `app` 属性） | Dockerfile `CMD` | `python -c "from tradedesk.api.app import app"` 能导入 |
+| 6.2 | `requirements.txt` 必须真的装上 **fastapi / uvicorn / httpx** —— 现在这三个还是注释掉的，不放出来镜像里没有 uvicorn | Dockerfile `CMD` | 镜像里 `uvicorn --version` 可用 |
+| 6.3 | 必须提供 **GET /health** 并返回 200 | Dockerfile `HEALTHCHECK` | `curl -fsS http://127.0.0.1:8080/health` |
+| 6.4 | 容器内 `PYTHONPATH=/app/src`、端口 **8080**、`PYTHONIOENCODING=utf-8` | Dockerfile `ENV` | 配置默认值与之一致 |
+| 6.5 | SQLite 路径按**项目根**解析（不是当前工作目录）—— 容器里是 `/app/data/tradedesk.db` | config.py | 两个 worktree 不共用同一个库文件 |
+
 ## 二、审核方会怎么验
 
 1. **不只跑 `verify_s2.py`**：审核方自己按上表重写一遍断言，重点是上表没有、
