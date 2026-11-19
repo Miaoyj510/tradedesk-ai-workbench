@@ -77,6 +77,7 @@ class EventType(str, Enum):
     GATE_TOKEN_ISSUED = "gate.token.issued"
     GATE_TOKEN_CONSUMED = "gate.token.consumed"
     WRITE_REJECTED = "write.rejected"
+    HANDOFF_REJECTED = "handoff.rejected"
     SIGNED_OFF = "signed_off"
     SENT = "sent"
     HUMAN_TAKEOVER = "human.takeover"

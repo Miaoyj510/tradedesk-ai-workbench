@@ -91,3 +91,74 @@ def seed_demo(store: StateStore) -> None:
     for t in demo_threads():
         if store.get_thread(t.thread_id) is None:
             store.create_thread(t)
+
+# ---------------------------------------------------------------------------
+# S2：Inquiry / Sentinel 用的演示知识快照
+# ⚠ 名单为**结构化演示数据**，不是真实名单（PRD 13.4.12）。
+#    真实名单源需要商用授权，本期不接入。
+# ---------------------------------------------------------------------------
+
+DEMO_PRODUCTS = [
+    {
+        "sku": "X-200",
+        "name": {"zh": "手动液压搬运车", "en": "Manual Hydraulic Hand Truck",
+                 "es": "Carretilla hidráulica manual", "ar": "عربة يدوية هيدروليكية"},
+        "material": "铸铁泵体 + 尼龙轮",
+        "capacity": "额定载荷 2 吨",
+        "moq": 1000,
+        "lead_time_days": "25-30",
+        "price_low": 4.85, "price_high": 5.20, "currency": "USD",
+        "terms": "FOB",
+        "port": "Shenzhen",
+        "hs_code": "8479.90",
+        "controlled": False,
+        "certificates": ["CERT-CE-2041"],
+    },
+    {
+        "sku": "M-77",
+        "name": {"zh": "手动吊装夹具", "en": "Manual Lifting Clamp",
+                 "es": "Eslinga de elevación manual", "ar": "مشبك رفع يدوي"},
+        "material": "铸钢 + 尼龙滚轮钳口",
+        "capacity": "安全载荷 500 kg",
+        "moq": 100,
+        "lead_time_days": "20-25",
+        "price_low": 6.40, "price_high": 6.90, "currency": "USD",
+        "terms": "FOB",
+        "port": "Ningbo",
+        "hs_code": "8479.89",
+        "controlled": False,
+        "certificates": ["TC-M77-118", "CERT-ISO-9001"],
+    },
+]
+
+DEMO_CERTIFICATES = [
+    {"cert_no": "CERT-CE-2041", "type": "CE", "covers": ["X-200"], "valid_until": "2027-03-31",
+     "issuer": "TÜV SÜD (0086)"},
+    {"cert_no": "TC-M77-118", "type": "Test Certificate", "covers": ["M-77"], "valid_until": "2026-08-12",
+     "issuer": "SGS"},
+    {"cert_no": "CERT-ISO-9001", "type": "ISO 9001", "covers": [], "valid_until": "2027-01-15",
+     "issuer": "工厂资质"},
+]
+
+# 演示名单：结构化样例，非真实名单
+DEMO_SANCTIONS = [
+    {"entry_id": "CN-2211", "name": "Gulf Trading Partners LLC", "country": "AE",
+     "type": "出口管制·受控最终用户", "list_version": "sanctions-2026.11-a"},
+    {"entry_id": "CN-2307", "name": "Demo Metal Trading SARL", "country": "SA",
+     "type": "出口管制·受控最终用户", "list_version": "sanctions-2026.11-a"},
+]
+
+# 受控/高风险目的国（演示口径）
+DEMO_RESTRICTED_COUNTRIES = ["AE", "SA", "IR", "KP", "SY"]
+
+
+def demo_products() -> list:
+    return [dict(p) for p in DEMO_PRODUCTS]
+
+
+def demo_certificates() -> list:
+    return [dict(c) for c in DEMO_CERTIFICATES]
+
+
+def demo_sanctions() -> list:
+    return [dict(s) for s in DEMO_SANCTIONS]
