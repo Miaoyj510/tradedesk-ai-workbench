@@ -121,4 +121,5 @@ Set-Location $repo
 
 - 现在先把**本地**提交做扎实（每个切片一个提交）。
 - 推 GitHub 建议**先推私有库**做备份，等全部切片完成、README 整理好再转公开。
+- 本机网页版 github.com/new 会报「Couldn't check availability」（网络问题），改用 scripts/publish_github.ps1 走 API 创建并推送。
 - 推之前务必确认 `git status` 干净、`.gitignore` 生效（`.venv/`、`data/`、`*.db`、`.env` 绝不能进仓库）。

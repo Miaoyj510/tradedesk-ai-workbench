@@ -90,6 +90,22 @@ $docker = "C:\Users\DELL\AppData\Local\Programs\DockerDesktop\resources\bin\dock
 
 > 交付前自检：在 **Windows PowerShell 5.1** 下跑 `& $dev check`，三段全绿再交付。
 > 验证方式：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<项目>\dev.ps1" check`
+### 发布到 GitHub
+
+网页版 `github.com/new` 在本机网络下会报「Couldn't check availability」（api.github.com 可达，但网页那个查询请求超时），所以走脚本：
+
+```powershell
+# ① 先到 https://github.com/settings/tokens/new 建 Token（classic，勾 repo 权限）
+# ② 自检（不联网、不需要 Token）
+& ".\scripts\publish_github.ps1" -DryRun
+# ③ 建私有仓库并推送 main / agent-a / agent-b（会提示输入 Token，不回显）
+& ".\scripts\publish_github.ps1"
+# 想建公开仓库：加 -Public
+```
+
+Token 只在本机内存里用：通过 `GIT_ASKPASS` 传给 git，**不写进 `.git/config`、不进命令行历史、不进聊天记录**。
+推送策略：**现在推私有库做备份与协作底座，全部切片完成、README 整理好之后再转公开。**
+
 ### 保持目录干净的三条规矩
 
 1. **验证脚本结束即清理**：每次 `verify` 跑完会自动删掉 SQLite 临时库、清空 PostgreSQL 表、删除 `data/tmp`。
