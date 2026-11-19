@@ -57,6 +57,7 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 & $dev verify             # 只跑 S1 验证
 & $dev test               # 只跑 pytest
 & $dev audit              # S2 独立审核（审核方断言）
+& $dev audit3             # S3 独立审核（审核方断言；R11 缺陷修完前为红）
 & $dev serve              # 起 HTTP 接口（http://127.0.0.1:8080/docs）
 & $dev clean              # 清验证临时文件与缓存
 ```
