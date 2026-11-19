@@ -77,6 +77,11 @@ class GitHubAPI:
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:400]
             raise RuntimeError(f"{method} {path} → HTTP {e.code}: {detail}") from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(
+                f"{method} {path} → 网络不可达：{e.reason}。"
+                f"若本机开着代理，可设置环境变量 TRADEDESK_PROXY=http://127.0.0.1:7897 后重试"
+            ) from e
 
     # ---- 对象创建 ----
     def ensure_blob(self, sha: str) -> str:
@@ -156,6 +161,33 @@ class GitHubAPI:
             iso = dt.isoformat()
         return {"name": name.strip(), "email": email.strip(), "date": iso}
 
+    # ---- 空仓库引导 ----
+    def ensure_repo_initialized(self) -> bool:
+        """空仓库不能直接创建 blob/tree/commit（GitHub 返回 409 Git Repository is empty.）。
+        先用 Contents API 建一个初始 README，让仓库有第一个 commit，之后 git 数据 API 才可用。"""
+        try:
+            self._req("GET", f"/repos/{self.owner}/{self.repo}/contents/README.md")
+            return False
+        except RuntimeError as e:
+            msg = str(e)
+            if "HTTP 401" in msg or "HTTP 403" in msg:
+                raise
+            if "HTTP 409" in msg and "empty" in msg.lower():
+                pass          # 空仓库：正好需要引导
+            elif "HTTP 404" in msg:
+                pass          # 没有 README 但仓库非空
+            else:
+                raise
+        content = base64.b64encode(
+            ("# " + self.repo + "\n\n由 TradeDesk-AI 发布脚本初始化。\n").encode("utf-8")
+        ).decode("ascii")
+        print("    · 仓库为空：先用 Contents API 建初始 commit（让仓库不再是空仓库）")
+        self._req("PUT", f"/repos/{self.owner}/{self.repo}/contents/README.md",
+                  {"message": "chore: initialize repository (TradeDesk-AI publisher)",
+                   "content": content})
+        print("    ✓ 初始 commit 已建立")
+        return True
+
     # ---- 分支引用 ----
     def get_ref(self, branch: str):
         try:
@@ -218,6 +250,8 @@ def _push_all(api, args) -> int:
                 print(f"    would push {c[:10]}  {git('log','-1','--format=%s',c)}")
             continue
 
+        if not api.ensure_repo_initialized():
+            pass
         ref = api.get_ref(branch)
         remote_sha = ref["object"]["sha"] if ref else None
         print(f"\n[{branch}] 本地 {len(commits)} 个提交；远端当前：{remote_sha or '（无）'}")

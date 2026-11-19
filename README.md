@@ -34,6 +34,7 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 & $dev verify    # 双后端验证（S1，48 项 × 2）
 & $dev test      # pytest（26 项）
 & $dev status    # 看容器与端口
+& $dev push      # 推送当前分支到 GitHub（git 优先，失败自动切 API）
 & $dev down      # 停容器
 
 & $dev verify -Backend postgres   # 只跑 Postgres 后端
