@@ -1,56 +1,44 @@
 # NEXT —— 状态卡（2026-11-19）
 
 > **每次开工先读这一页。** 上下文丢了不要紧，这页写着现在到哪了、下一步干什么。
-> 配套：`docs/S2-ACCEPTANCE.md`（验收基线）、`docs/S2-AUDIT-R9.md`（审核报告详版）。
+> 配套：`docs/S2-ACCEPTANCE.md`（S2 验收基线）、`docs/S2-AUDIT-R9.md`（R9 审核报告）、
+> `docs/S3-ACCEPTANCE.md`（S3 验收清单）。
 
 ## 一、现在到哪了
 
 | 切片 | 状态 |
 | --- | --- |
 | S1（存储层 / 领域模型 / 状态机 / 闸门） | ✅ 收口 |
-| S2（Supervisor / Handoff / FastAPI / 闸门令牌） | ✅ 已交卷（`4aeb6be`），自证 94/94 + pytest 101 全绿 |
-| **S2 审核 R9** | ✅ 完成（`8927d7c`，分支 `agent-b`）：独立断言 107 项，**14 个根因待修** |
-| S2 缺陷修复 | ⬜ **未开始 —— 下一步就是这件事** |
-| S3+ | ⬜ 未开始 |
+| S2（Supervisor / Handoff / FastAPI / 闸门令牌） | ✅ 收口 |
+| S2 审核 R9（14 个根因，含 1 个 P0 越权） | ✅ 审核完成（`8927d7c`，分支 `agent-b`） |
+| S2 缺陷修复 R10 | ✅ 14 个根因全修完（`9a34d4e`） |
+| **S3（检索层：多语种召回 / 合规时效 / 引用装配）** | ✅ 已交卷（`3e86884`，分支 `agent-a`），自证 38/38 |
+| S4（真实向量检索：BGE-M3 + pgvector） | ⬜ **下一步就是这件事** |
+| S5（接 MiniMax 真模型 + 成本计量） | ⬜ 未开始 |
+| S6（前端联调 + 镜像 + 灰度回滚） | ⬜ 未开始 |
 
-分支现状：`main` 领先 3 个提交（`scripts/push.ps1` 可靠性修复，**与 S2 运行时无关**），
-`agent-b` 领先 1 个提交（R9 审核）。`agent-a` 与 `main` 同步在 `c381d62`。
+`dev.ps1 check` 现在是**六步**，当前全绿：语法 → S1 双后端 53/53 → S2 自证 97/97 →
+S3 自证 38/38 → S2 独立审核 106/106 → pytest 124 passed。
 
-## 二、下一步：修 R9 的 14 个根因
+分支现状：`main` = `e9b8278`（已合并 S3），`agent-a` = `3e86884`（S3 实现线），
+`agent-b` = `f4fb934`（R9 审核线）。
 
-详版（复现步骤、PRD 出处、最小改法）见 `docs/S2-AUDIT-R9.md`；条款号见
-`docs/S2-ACCEPTANCE.md` 第六节。按这个顺序做：
+## 二、下一步：S4 真实向量检索
 
-### 切片 A —— 越权路径（三条一起做，同一个根因族）
+S3 只是**词法（BM25）+ 结构化（型号/证书号/HS 精确匹配）**双通道，稠密通道是占位实现。
+S4 才把"多语种语义召回"变成真的，验收基线见 PRD 第 9 章与第 12 章。
 
-| # | 缺陷 | 位置 |
-| --- | --- | --- |
-| **R9-01（P0）** | 推进阶段是写操作，却不挂闸门令牌 —— 无令牌 `POST /advance` 返回 200 且阶段已变 | `api/app.py` 的 `/advance` 端点 + `runtime/supervisor.py` 的 `Supervisor.advance` |
-| R9-02 | 无令牌的写请求被依赖层 403，**审计里一条留痕都没有** | `api/deps.py` 的 `require_gate_token` |
-| R9-02b | `action=""` 的令牌是**万能令牌**（签发端不校验 action，可用于 `send` 外发） | `api/app.py` 的 `GateTokenBody` + `runtime/gates.py` 的 `consume` |
+| 事项 | 现状 / 约束 |
+| --- | --- |
+| 嵌入模型 | BGE-M3（多语种），本机无 GPU（Iris Xe 共享显存 128MB）、16GB 内存 → 走 ONNX 量化版或远端嵌入 API |
+| 向量库 | PostgreSQL 16 + pgvector。**Docker Hub 拉不到镜像**，用本地构建：`docker/pgvector/Dockerfile` |
+| 替换点 | `retrieval/base.py` 的 `Embedder` / `Retriever` 协议，`retrieval/embedders.py` 的 `NullEmbedder` 就是替身 |
+| 检索口径 | 公开基准（MIRACL / MLDR / Mr. TyDi / mMARCO / MKQA）只能证明**检索管线**没问题，证明不了询盘场景做得好 —— 询盘语料必须自建（PRD 9.5 两层口径，别混） |
+| 硬指标 | 引用正确率 100%、制裁名单召回 ≥ 99%、单位询盘 Token 成本 ≤ 0.2 元/条 |
+| 并发 | 测试 1–3 人；生产 50–100 并发（此时向量检索的批量与缓存策略要一起定） |
 
-验收：`dev.ps1 audit` 里 §4.1 / §4.2 全绿。
-
-### 切片 B —— 并发（要动存储层）
-
-| # | 缺陷 | 位置 |
-| --- | --- | --- |
-| R9-03 | 幂等判定与建线程不原子 → 并发重复投递建出 2~5 条线程 | `runtime/supervisor.py` 的 `ingest` + 存储层唯一约束 |
-| R9-04 | 同线程并发写 → 乐观锁冲突抛未捕获 `RuntimeError` → 500（应 409） | `store/*.py` 的 `save_thread` + Supervisor 各写方法 |
-
-### 切片 C —— 状态持久性（跨天长事务的地基，S3 开工前必须做掉）
-
-| # | 缺陷 | 位置 |
-| --- | --- | --- |
-| R9-05 | SLA 是死代码：`SLA_DEFAULTS` 零读取点、线程 `deadlines` 恒空、Watchdog 扫不到 | `runtime/supervisor.py` + `config.py` + `domain/state_machine.py` |
-| R9-06 | 草稿只存内存 → 重启后签核界面 `draft_body=None` | `runtime/supervisor.py` 的 `self.drafts` |
-| R9-07 | 线程号按 `len(线程数)` 推导 → 多实例 / 库里有空洞就撞号 | `runtime/supervisor.py` 的 `_id_base` / `_next_thread_id` |
-
-### 切片 D —— 签核与留痕细节（可合并成一个切片）
-
-R9-08 修改后通过不承载内容 ｜ R9-09 签核留痕缺价格要素与条款版本 ｜
-R9-10 Agent 动作记成 `actor=system` ｜ R9-11 未注册角色抛 RuntimeError ｜
-R9-12 Handoff 异常类型不统一 ｜ R9-13 签核后 `last_activity_at` 不推进
+建议 S4 切成三小步：**4a 嵌入接口与 pgvector 表结构** → **4b 向量通道接入 RRF（第三通道）**
+→ **4c 语义召回评测与回归**。每步照旧"一片一提交 + 验证脚本"。
 
 ## 三、每片子的验收动作
 
@@ -59,9 +47,6 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 & $dev check -Dsn "postgresql://tradedesk:tradedesk_local_dev@127.0.0.1:5433/tradedesk_a"  # 实现 agent
 & $dev audit                                                                          # 审核断言
 ```
-
-**`dev.ps1 audit` 现在是红的**（14 个根因）。修完切片 A/B/C/D 后它必须全绿，
-届时建议把它折进 `dev.ps1 check`，让越权路径从此变成交付门禁。
 
 审核脚本双后端跑法（脚本自建独立库并回收，**不要**指向 `tradedesk_a` / `tradedesk_b`）：
 
@@ -72,12 +57,10 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 
 ## 四、别忘了合并
 
-R9 审核提交在 `agent-b`（`8927d7c`），要落到主线得按 WORKFLOW.md 第 6 节走：
-`agent-b` → `agent-a`（解决冲突、跑测试）→ `main`（再跑一次 `check`）。
-合并顺序建议：**先让实现 agent 把 R9 缺陷修完并让 audit 跑绿，再一起合**，
-免得把一个已知红的审核脚本合进 main。
+合并路径固定为 `agent-b` → `agent-a` → `main`，每次合并后在集成区重跑一次 `check`。
+S3 已走完这条路径：`agent-a`(`3e86884`) → `main`(`e9b8278`)，三线远端 SHA 已核对一致。
 
 ## 五、几个已知的坑
 
 见根目录 `CLAUDE.md` 的"本项目特有的坑"一节（枚举 `str()`、SQLite 跨线程、
-闸门令牌绑定、`dev.ps1` 的 BOM、GBK 控制台、PostgreSQL 审核库）。
+闸门令牌绑定、`dev.ps1` 的 BOM、控制台 GBK、PostgreSQL 审核库）。
