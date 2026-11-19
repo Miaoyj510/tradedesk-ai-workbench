@@ -27,6 +27,15 @@ def canonical_ts(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
 
 
+def enum_val(x: Any) -> str:
+    """枚举 → 它在库里存的那个字符串。
+
+    ⚠ 不要用 `str(枚举)`：Python 3.11 起 `str(Stage.QUOTING)` 是 "Stage.QUOTING"，
+    不是 "QUOTING"。拿它去查库会一条都查不到（FR-ORC-10 看板按阶段筛选会静默返回空）。
+    """
+    return x.value if hasattr(x, "value") else str(x)
+
+
 def audit_hash(seq: int, actor: str, action: str, target: str, payload: Dict[str, Any],
                ts: datetime, prev_hash: str) -> str:
     """审计条目的哈希：内容 + 前一条哈希 → 链式防篡改。"""

@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from tradedesk.domain.enums import Actor, EventType, Language
+from tradedesk.domain.enums import Actor, EventType, Language, Stage
 from tradedesk.domain.models import ThreadEvent
 from tradedesk.domain.state_machine import build_thread
 
@@ -74,4 +74,23 @@ def test_optimistic_lock():
     store.save_thread(fresh)
     with _pytest.raises(RuntimeError):
         store.save_thread(stale)
+    store.close()
+
+
+def test_filter_by_stage_accepts_enum_or_string():
+    """与 SQLite 后端行为一致：枚举和字符串都能筛。
+
+    ⚠ str(Stage.QUOTING) 是 "Stage.QUOTING"，用它筛会静默返回空列表。
+    两个后端必须一样 —— PRD 13.4.5 的选型轴②就是"业务代码零改动换后端"。
+    """
+    store = _store()
+    quoting = build_thread("T-PG-F1", "BY-1", Language.EN)
+    quoting.stage = Stage.QUOTING
+    store.create_thread(quoting)
+    store.create_thread(build_thread("T-PG-F2", "BY-2", Language.AR))
+
+    assert len(store.list_threads(stage=Stage.QUOTING)) == 1
+    assert len(store.list_threads(stage="QUOTING")) == 1
+    assert len(store.list_threads(stage=Stage.INQUIRY)) == 1
+    assert len(store.list_threads(language=Language.AR)) == 1
     store.close()

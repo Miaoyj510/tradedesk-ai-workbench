@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import audit_hash, canonical_ts
+from .base import audit_hash, canonical_ts, enum_val
 from ..domain.models import (
     AuditEntry,
     CustomerProfile,
@@ -84,11 +84,6 @@ CREATE TABLE IF NOT EXISTS gate_tokens (
     consumed_at TEXT
 );
 """
-
-
-def _enum_val(x: Any) -> str:
-    "兼容枚举与字符串两种写法，避免调用方直接赋值字符串导致崩溃。"
-    return x.value if hasattr(x, "value") else str(x)
 
 
 def _dumps(obj: Any) -> str:
@@ -220,7 +215,7 @@ class SqliteStateStore:
             "INSERT INTO threads(thread_id, buyer_id, stage, language, version, payload, updated_at) "
             "VALUES(?,?,?,?,?,?,?)",
             (
-                thread.thread_id, thread.buyer_id, _enum_val(thread.stage), _enum_val(thread.language),
+                thread.thread_id, thread.buyer_id, enum_val(thread.stage), enum_val(thread.language),
                 thread.version, _dumps(thread.model_dump(mode="json")),
                 datetime.now(timezone.utc).isoformat(),
             ),
@@ -239,7 +234,7 @@ class SqliteStateStore:
             cur = self._conn.execute(
                 "UPDATE threads SET stage=?, language=?, version=?, payload=?, updated_at=? WHERE thread_id=? AND version=?",
                 (
-                    _enum_val(thread.stage), _enum_val(thread.language), thread.version,
+                    enum_val(thread.stage), enum_val(thread.language), thread.version,
                     _dumps(thread.model_dump(mode="json")),
                     datetime.now(timezone.utc).isoformat(), thread.thread_id, thread.version - 1,
                 ),
@@ -256,7 +251,11 @@ class SqliteStateStore:
         sql = "SELECT payload FROM threads"
         clauses, params = [], []
         if "stage" in filters and filters["stage"]:
-            clauses.append("stage=?"); params.append(str(filters["stage"]))
+            # enum_val：不能写 str(filters["stage"]) —— str(Stage.QUOTING) 是
+            # "Stage.QUOTING"，用它筛会一条都查不到（看板按阶段筛选会静默返回空）
+            clauses.append("stage=?"); params.append(enum_val(filters["stage"]))
+        if "language" in filters and filters["language"]:
+            clauses.append("language=?"); params.append(enum_val(filters["language"]))
         if "buyer_id" in filters and filters["buyer_id"]:
             clauses.append("buyer_id=?"); params.append(filters["buyer_id"])
         if clauses:

@@ -135,6 +135,14 @@ def scenario_1_seed(store: SqliteStateStore) -> None:
     check("T-1042 未决问题保留 2 条", t42 is not None and len(t42.open_questions) == 2)
     check("T-1043 带名单命中标记", store.get_thread("T-1043") is not None
           and "sanction_hit" in store.get_thread("T-1043").status_flags)
+    # 看板按阶段/语种筛选（FR-ORC-10）：枚举和字符串都要能筛。
+    # ⚠ str(Stage.QUOTING) 是 "Stage.QUOTING"，用它筛会静默返回空列表。
+    check("按阶段筛选（传枚举）可用", len(store.list_threads(stage=Stage.QUOTING)) == 1,
+          f"实际 {len(store.list_threads(stage=Stage.QUOTING))}")
+    check("按阶段筛选（传字符串）可用", len(store.list_threads(stage="QUOTING")) == 1,
+          f"实际 {len(store.list_threads(stage='QUOTING'))}")
+    check("按语种筛选（传枚举）可用", len(store.list_threads(language=Language.AR)) == 1,
+          f"实际 {len(store.list_threads(language=Language.AR))}")
 
 
 def scenario_2_transitions(store: SqliteStateStore) -> None:
@@ -153,6 +161,18 @@ def scenario_2_transitions(store: SqliteStateStore) -> None:
     check("合法迁移 INQUIRY→SAMPLING→QUOTING 完成", cur.stage.value == "QUOTING")
     check("阶段迁移写入事件日志", len(store.list_events("T-9001")) == 3,
           f"事件数 {len(store.list_events('T-9001'))}")
+
+    # 阶段进入时间：必须是"迁移发生的那一刻"，不是抄线程的最后活动时间。
+    # 阶段停留时长、SLA 守护、看板的"等待人审时长"都建在这个字段上。
+    stamp = datetime(2026, 3, 1, 12, 0, tzinfo=timezone.utc)
+    probe = build_thread("T-9001B", "BY-BR-01", Language.ES, message_hash="sha-9001b")
+    probe.last_activity_at = stamp - timedelta(days=7)
+    store.create_thread(probe)
+    moved = apply_transition(store.get_thread("T-9001B"), "SAMPLING", at=stamp)
+    store.save_thread(moved)
+    got = store.get_thread("T-9001B")
+    check("阶段进入时间 = 迁移时点", got.stage_entered_at == stamp, str(got.stage_entered_at))
+    check("最后活动时间随迁移推进", got.last_activity_at == stamp, str(got.last_activity_at))
 
     ok, reason = check_transition(cur, "ORDERED")
     check("缺合同版本时 QUOTING→ORDERED 被拦截", ok is False, reason)
