@@ -209,8 +209,9 @@ class InquiryAgent(BaseAgent):
 
     def _fetch_spec(self, sku: str, country: str, lang: str):
         """按型号取结构化规格记录（数值的唯一真源）。"""
+        # 按**标识**取规格记录，不需要语义 → 不走稠密通道（节省一次云端调用）
         query = SearchQuery(text=sku, lang=lang, buyer_country=country,
-                            today=date.today(), top_k=5)
+                            today=date.today(), top_k=5, use_dense=False)
         for h in self.retriever.search(query):
             if h.chunk.doc_type == "产品规格" and h.chunk.identifiers.get("sku") == sku:
                 return h.chunk
@@ -219,7 +220,7 @@ class InquiryAgent(BaseAgent):
     def _fetch_cert(self, cert_no: str, country: str, lang: str):
         """按证书号精确回查证书块（证书不按买家国别过滤，FR-KB-06）。"""
         query = SearchQuery(text=cert_no, lang=lang, buyer_country=country,
-                            today=date.today(), top_k=3)
+                            today=date.today(), top_k=3, use_dense=False)
         for h in self.retriever.search(query):
             if h.chunk.doc_type == "证书" and h.chunk.identifiers.get("cert_no") == cert_no:
                 return h.chunk
@@ -360,6 +361,9 @@ class InquiryAgent(BaseAgent):
                                       note=f"{c.title} · 语言 {c.lang} · 库版本 {c.kb_version}"))
             elif c.doc_type == "产品规格":
                 # 规格记录 = 数值的唯一真源（FR-KB-07：产品 SKU 与规格版本）。
+                # 只能引**本型号**的规格记录 —— 引用里混进别的型号的规格是对外失真（R16 答）。
+                if sku and str(c.identifiers.get("sku", "")).upper() != sku.upper():
+                    continue
                 extra = c.extra or {}
                 cites.append(Citation(citation_id=c.identifiers.get("attr_id", c.doc_id), type="产品规格",
                                       note=(f"规格版本 {c.identifiers.get('attr_id', c.doc_id)}"

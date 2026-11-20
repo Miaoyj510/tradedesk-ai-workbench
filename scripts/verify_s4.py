@@ -47,6 +47,7 @@ from tradedesk.data.kb_seed import KB_VERSION, load_kb      # noqa: E402
 from tradedesk.retrieval.embedders import (                 # noqa: E402
     EmbeddingError, HashEmbedder, NullEmbedder, RemoteEmbedder, cosine,
 )
+from tradedesk.retrieval.base import SearchQuery               # noqa: E402
 from tradedesk.retrieval.indexer import chunk_text, embedder_tag, index_kb, load_index  # noqa: E402
 from tradedesk.retrieval.vector_index import VectorIndex    # noqa: E402
 from tradedesk.store.postgres_store import PostgresStateStore  # noqa: E402
@@ -271,6 +272,124 @@ def scenario_6_pgvector_column(store) -> None:
         check("未安装 pgvector 时降级为 JSONB", col == "jsonb", col)
 
 
+class FakeSemanticEmbedder(HashEmbedder):
+    """假的“语义”嵌入器（semantic=True）—— 测试用，不联网。
+
+    继承哈希嵌入器（向量与索引里的同一个空间），只是把 `semantic` 标位置为 True，
+    用来验证“稠密通道确实被接上了”。它**不具备语义能力**。
+    """
+
+    name = "fake-semantic"
+    semantic = True
+    model = "fake"
+
+
+def scenario_7_dense_channel(store) -> None:
+    section("场景 7 · 稠密通道（S4-4b：第三通道 + 语义守卫）")
+    from tradedesk.retrieval.indexer import index_kb, load_index
+    from tradedesk.retrieval.store_retriever import StoreRetriever
+
+    blocks = store.list_kb_chunks(KB_VERSION)
+    store.clear_kb_embeddings()
+    # 向量用哈希嵌入器生成（它不语义，但用来填索引结构可以）。
+    # 维度必须与存储列一致（pgvector 的 vector(N) 会拒绝错误维度）。
+    _dim = getattr(store, "vector_dim", 0) or 16
+    index_kb(store, HashEmbedder(dim=_dim), KB_VERSION, chunks=blocks)
+    idx = load_index(store, KB_VERSION)
+
+    # --- 有语义能力的嵌入器 → 稠密通道应该出现 ---
+    r1 = StoreRetriever(store, KB_VERSION, embedder=FakeSemanticEmbedder(dim=_dim), vector_index=idx)
+    hits = r1.search(SearchQuery(text="Quote 5000 pcs of X-200 FOB Shenzhen", lang="en", top_k=5))
+    chans = sorted({ch for h in hits for ch in h.channels})
+    check("语义嵌入器下稠密通道应出现", "dense" in chans, str(chans))
+    check("稠密通道确实调用了查询嵌入", r1.dense_calls == 1, str(r1.dense_calls))
+    # 型号识别的唯一权威是结构化通道：第一个命中必须仍是点名的型号块
+    first = hits[0].chunk if hits else None
+    check("结构化命中仍排第一（稠密通道不能夺走型号识别）",
+          first is not None and first.identifiers.get("sku") == "X-200",
+          str(first.identifiers.get("sku") if first else None))
+    dense_specs = [h.chunk.chunk_id for h in hits
+                   if "dense" in h.channels and h.chunk.doc_type == "产品规格"]
+    check("「产品规格」块不进稠密通道", not dense_specs, str(dense_specs))
+
+    # --- 假嵌入器（semantic=False）→ 守卫生效，不开稠密通道 ---
+    r2 = StoreRetriever(store, KB_VERSION, embedder=HashEmbedder(dim=_dim), vector_index=idx)
+    hits2 = r2.search(SearchQuery(text="Quote 5000 pcs of X-200 FOB Shenzhen", lang="en", top_k=5))
+    chans2 = sorted({ch for h in hits2 for ch in h.channels})
+    check("假嵌入器（semantic=False）不得开启稠密通道", "dense" not in chans2, str(chans2))
+    check("未开启稠密通道时记得原因", bool(r2.dense_skipped), str(r2.dense_skipped))
+    check("未开启稠密通道时不调用云端嵌入", r2.dense_calls == 0, str(r2.dense_calls))
+
+    # --- 没有向量索引 → 降级双通道，不报错 ---
+    r3 = StoreRetriever(store, KB_VERSION, embedder=FakeSemanticEmbedder(dim=_dim), vector_index=None)
+    hits3 = r3.search(SearchQuery(text="Quote 5000 pcs of X-200 FOB Shenzhen", lang="en", top_k=5))
+    chans3 = sorted({ch for h in hits3 for ch in h.channels})
+    check("无向量索引时降级为双通道", "dense" not in chans3 and hits3, str(chans3))
+    check("无向量索引时记得原因", bool(r3.dense_skipped), str(r3.dense_skipped))
+
+    # --- 查询嵌入失败 → 不阻断检索 ---
+    class BrokenEmbedder(FakeSemanticEmbedder):
+        def embed_query(self, text):
+            raise RuntimeError("云端嵌入失败")
+    r4 = StoreRetriever(store, KB_VERSION, embedder=BrokenEmbedder(dim=_dim), vector_index=idx)
+    hits4 = r4.search(SearchQuery(text="Quote 5000 pcs of X-200 FOB Shenzhen", lang="en", top_k=5))
+    check("查询嵌入失败不阻断检索（降级而不崩盘）", bool(hits4), str(len(hits4)))
+    check("查询嵌入失败时记得原因", bool(r4.dense_skipped), str(r4.dense_skipped))
+
+
+class CountingSemanticEmbedder(HashEmbedder):
+    """计数的假语义嵌入器（用来统计**每条询盘调用几次**）。"""
+
+    name = "counting-semantic"
+    semantic = True
+    model = "fake"
+
+    def __init__(self, dim=16):
+        super().__init__(dim=dim)
+        self.query_calls = 0
+
+    def embed_query(self, text):
+        self.query_calls += 1
+        return super().embed_query(text)
+
+
+def scenario_8_agent_dense(store) -> None:
+    section("场景 8 · Agent 侧稠密通道（引用不串型号 / 每条询盘 1 次嵌入）")
+    from fastapi.testclient import TestClient
+    from tradedesk.api.app import create_app
+    from tradedesk.api.deps import AppContext, build_registry
+    from tradedesk.retrieval.indexer import index_kb, load_index
+    from tradedesk.retrieval.store_retriever import StoreRetriever
+
+    blocks = store.list_kb_chunks(KB_VERSION)
+    _dim = getattr(store, "vector_dim", 0) or 16
+    store.clear_kb_embeddings()
+    index_kb(store, HashEmbedder(dim=_dim), KB_VERSION, chunks=blocks)
+    idx = load_index(store, KB_VERSION)
+
+    ctx = AppContext(store=store)
+    emb = CountingSemanticEmbedder(dim=_dim)
+    ctx.embedder = emb
+    ctx.vector_index = idx
+    ctx.retriever = StoreRetriever(store, KB_VERSION, embedder=emb, vector_index=idx)
+    ctx.registry = build_registry(retriever=ctx.retriever)
+    if getattr(ctx, "supervisor", None) is not None:
+        ctx.supervisor.registry = ctx.registry
+    c = TestClient(create_app(ctx))
+
+    d = c.post("/inbound", json={
+        "buyer_id": "BY-S4-08", "country": "BR", "language": "en", "company": "Demo Co",
+        "message": "Quote 5000 pcs of X-200 FOB Shenzhen, do you have CE certificate?"}).json()
+    cites = [x["citation_id"] for x in (d.get("draft") or {}).get("citations", [])]
+    spec_cites = [c2 for c2 in cites if c2.startswith("SPEC-")]
+    check("引用里的规格记录只有**本型号**（不能串型号）",
+          spec_cites == ["SPEC-X-200"], f"规格引用={spec_cites} 全部引用={cites}")
+    check("每条询盘只触发**1 次**查询嵌入（内部回查不走稠密通道）",
+          emb.query_calls == 1, f"{emb.query_calls} 次")
+    body = (d.get("draft") or {}).get("body", "")
+    check("正文价格与本型号一致", "4.85" in body and "12.3" not in body, body[:80].replace("\n", " "))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="S4 验证脚本")
     ap.add_argument("--dsn", default=None)
@@ -282,7 +401,9 @@ def main() -> int:
     print("提示：本轮不验证语义召回质量（PRD 9.5 两层口径，属 S4c）")
 
     if args.dsn:
-        store = PostgresStateStore(args.dsn, vector_dim=1024)
+        # 向量列维度必须与配置一致（否则存储层会把列自动迁移并清空行）
+        from tradedesk.config import get_settings
+        store = PostgresStateStore(args.dsn, vector_dim=get_settings().embedding_dim)
     else:
         p = ROOT / "data" / "verify_s4.db"
         for suffix in ("", "-wal", "-shm"):
@@ -301,6 +422,8 @@ def main() -> int:
         scenario_4b_dimension_guard(store)
         scenario_5_vector_search()
         scenario_6_pgvector_column(store)
+        scenario_7_dense_channel(store)
+        scenario_8_agent_dense(store)
     finally:
         store.close()
         if not args.dsn:

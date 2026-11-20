@@ -128,7 +128,7 @@ class PostgresStateStore:
     """
 
     def __init__(self, dsn: str = DEFAULT_DSN, create: bool = True,
-                 vector_dim: int = 1024) -> None:
+                 vector_dim: int = 1536) -> None:
         import psycopg  # 延迟导入：没装驱动也能用 SQLite 后端跑
 
         self.dsn = dsn
@@ -500,6 +500,12 @@ class PostgresStateStore:
                 f"  content_fp TEXT NOT NULL DEFAULT '',"
                 f"  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
             self.embedding_column = "vector"
+            # ANN 索引：防量化下推到 pgvector 时，线性扫描会成为 50–100 并发下的瓶颈（N7）
+            try:
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_kb_embeddings_hnsw "
+                            "ON kb_embeddings USING hnsw (embedding vector_cosine_ops)")
+            except Exception:
+                pass
         else:
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS kb_embeddings ("
@@ -560,6 +566,22 @@ class PostgresStateStore:
                     continue
                 out.append((chunk_id, model, [float(x) for x in vec]))
         return out
+
+    def search_kb_vectors(self, query_vec, top_k: int = 10):
+        """pgvector 近邻检索（走 HNSW 索引）→ [(chunk_id, score)]。
+
+        只在列类是 vector 时可用；JSONB 降级下返回空列表（调用方回退到内存索引）。
+        """
+        if self.embedding_column != "vector":
+            return []
+        vec = "[" + ",".join(f"{float(x):.6f}" for x in query_vec) + "]"
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT chunk_id, 1 - (embedding <=> CAST(%s AS vector)) AS score "
+                "FROM kb_embeddings WHERE embedding IS NOT NULL "
+                "ORDER BY embedding <=> CAST(%s AS vector) LIMIT %s",
+                (vec, vec, int(top_k)))
+            return [(cid, float(score)) for cid, score in cur.fetchall()]
 
     def list_kb_embedding_meta(self, kb_version=None):
         sql, params = "SELECT chunk_id, model, content_fp FROM kb_embeddings", []

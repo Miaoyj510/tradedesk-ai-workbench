@@ -61,7 +61,6 @@ class AppContext:
         except Exception as exc:
             # 灌种子失败不阻断启动：检索层降级为"空库"，Agent 走低置信兜底
             print(f"[deps] 知识库种子灌入失败（检索将返回空结果）：{exc}")
-        self.retriever = StoreRetriever(self.store, self.kb_version)
         # 向量通道（S4）：只在显式开启且拿得到 key 时才建，
         # 否则启动会去调云端 API（计费）；索引失败也不阻断启动 ——
         # 检索层降级为词法 + 结构化双通道，且不得对外宣称有语义召回能力。
@@ -83,6 +82,9 @@ class AppContext:
                       "检索将降级为词法+结构化双通道；建索引跑 dev.ps1 index")
         except Exception as exc:
             print(f"[deps] 向量索引加载失败（检索降级为词法+结构化双通道）：{exc}")
+        # 检索器在嵌入器与向量索引就绪后创建：稠密通道才能接上去（S4-4b）。
+        self.retriever = StoreRetriever(self.store, self.kb_version,
+                                        embedder=self.embedder, vector_index=self.vector_index)
         self.registry = registry or build_registry(retriever=self.retriever)
         self.tokens = GateTokenService(store, ttl_seconds=self.config.gate_token_ttl_s)
         self.supervisor = Supervisor(
