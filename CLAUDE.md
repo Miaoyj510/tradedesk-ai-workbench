@@ -45,16 +45,18 @@ S1 收口 → S2 已交卷 → R9 审核（14 个根因）→ R10 全修完
 → S3 检索层交卷（`3e86884`）→ 审核 R11（8 个根因）→ 审核 R12（3 个根因）
 → **R12/R13 修复全部完成**（详见 `docs/S3-FIX-R13.md`）。
 
-`dev.ps1 check` 七步当前全绿：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
-→ S2 独立审核 106/106 → pytest 126 passed → **S3 独立审核 78/78**。
+→ **S4-4a 向量层交卷**（嵌入接口 / 向量存储 / 索引 / 余弦检索，见 `docs/S4-ACCEPTANCE.md`）。
 
-下一步是 S4（真实向量检索 BGE-M3 + pgvector）—— 看 `docs/NEXT.md`。
+`dev.ps1 check` 八步当前全绿：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
+→ S2 独立审核 106/106 → pytest 126 passed → S3 独立审核 78/78 → **S4 向量层 48/48**。
+
+下一步是 S4-4b（向量通道接入 RRF 第三通道，需要 MiniMax key）—— 看 `docs/NEXT.md`。
 
 ## 常用命令
 
 ```powershell
 $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
-& $dev check              # 交付前自检（七步）：语法 + S1 双后端 + S2/S3 自证 + S2/S3 独立审核 + pytest
+& $dev check              # 交付前自检（八步）：语法 + S1 双后端 + S2/S3 自证 + S2/S3 独立审核 + S4 + pytest
 & $dev verify             # 只跑 S1 验证
 & $dev test               # 只跑 pytest
 & $dev audit              # S2 独立审核（审核方断言）
@@ -89,6 +91,16 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 - **产品块分两类**：`doc_type="产品规格"` 是**数值的唯一真源**（价格/交期/MOQ/负荷），
   `doc_type="产品条目"` 是**每型号 4 个语言版本**的描述性文本（文本块里不得出现数值，PRD 9.3）。
 - **库版本号只有一份**：`config.kb_version` 直接引用 `data/kb_seed.py` 的 `KB_VERSION`，别再写字面量。
+- **pgvector 镜像只能本地构建**：`docker build -t tradesk/pgvector:pg16 -f docker/pgvector/Dockerfile .`。
+  Docker Hub 拉不到不可用 `postgresql16-pgvector`；从源码编译时 PGXS 要生成位码，需要 **clang21/llvm21**（`NO_BC=1` 对它无效）。
+- **嵌入默认关闭**：`TRADEDESK_EMBEDDER_ENABLED=1` + `MINIMAX_API_KEY` 才会调云端 API（启动即计费）。
+- **pgvector 的 `vector(N)` 列会拒绝错误维度**：换嵌入模型维度不同时要重建列（换模型时分步切换）。
+- **向量索引是显式动作**：`dev.ps1 index`（或 `scripts/index_kb.py`）。应用启动**只读**索引，不自动建
+  —— 否则每个审核脚本都要重新调云端 API 重新嵌入全部块（计费 + 慢）。
+- **`embo-01` 实测 1536 维**（不是文档常见的 1024）；响应里是 `vectors` 而不是 `data[].embedding`。
+- **`embo-01` 跨语种对齐弱**：zh↔es/ar 余弦相似度约 -0.02（无关）——四语分块与术语表桥接是必需的，不是优化。
+- **向量检索分不清型号**（型号号是弱信号）——型号识别的唯一权威是**结构化通道**，
+  融合时稠密通道的 RRF 参数必须大于结构化通道（见 docs/S4-ACCEPTANCE.md 第三节）。
 - **`list_kb_chunks` 必须有 `ORDER BY chunk_id`**：PostgreSQL 更新一行后那行会被挤到堆尾，不排序就不能靠顺序猜块。
 - **产品必须被结构化通道确认才进草稿**：只靠词法命中的产品不许报型号与价格，
   否则"给我个最好价"会被随便挑一个产品并报价。

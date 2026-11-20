@@ -127,10 +127,16 @@ class PostgresStateStore:
     审计链在这种并发下会断。HTTP 层是多线程的，所以这里按线程隔离连接。
     """
 
-    def __init__(self, dsn: str = DEFAULT_DSN, create: bool = True) -> None:
+    def __init__(self, dsn: str = DEFAULT_DSN, create: bool = True,
+                 vector_dim: int = 1024) -> None:
         import psycopg  # 延迟导入：没装驱动也能用 SQLite 后端跑
 
         self.dsn = dsn
+        self.vector_dim = int(vector_dim or 0)
+        # embedding 列的实际类型："vector"(有 pgvector) / "jsonb"(降级)。
+        # 它由初始化时探测决定，后面的写读都按它来分支。
+        self.embedding_column = "jsonb"
+        self.pgvector_available = False
         self._psycopg = psycopg
         self._local = threading.local()
         self._conns: List[Any] = []
@@ -176,6 +182,7 @@ class PostgresStateStore:
                 "INSERT INTO schema_meta(key, value) VALUES('schema_version', '1') "
                 "ON CONFLICT (key) DO NOTHING"
             )
+            self._init_embedding_table(cur)
 
     def close(self) -> None:
         """关闭所有线程的连接（不只是当前线程那条）。"""
@@ -443,6 +450,109 @@ class PostgresStateStore:
     def clear_kb(self) -> None:
         with self.conn.cursor() as cur:
             cur.execute("DELETE FROM kb_chunks")
+            cur.execute("DELETE FROM kb_embeddings")
+
+    # ---------- 向量（S4） ----------
+    def _init_embedding_table(self, cur) -> None:
+        """创建向量表：有 pgvector 就用 vector 列，没有就降级为 JSONB。
+
+        为什么不直接把 vector 写进 DDL：列的维度取决于使用的嵌入模型，
+        而扩展可能没装（本机是本地构建的镜像）。采用“探测扩展 → 选列型 → 已建表则认现有列型”，
+        因为列类型一旦建好就不再变（变了就要重建表，向量重算）。
+        """
+        try:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            self.pgvector_available = True
+        except Exception:
+            self.pgvector_available = False
+        cur.execute("SELECT udt_name FROM information_schema.columns "
+                    "WHERE table_name='kb_embeddings' AND column_name='embedding'")
+        row = cur.fetchone()
+        if row is not None:
+            self.embedding_column = "vector" if str(row[0]).lower() == "vector" else "jsonb"
+            if self.embedding_column == "vector" and self.vector_dim > 0:
+                # 现有 vector(N) 的 N 与当前嵌入模型不一致 → 重建该列。
+                # 向量是**派生数据**（可从知识块重新算出），不是业务数据，所以直接重建列。
+                cur.execute("SELECT atttypmod FROM pg_attribute "
+                            "WHERE attrelid='kb_embeddings'::regclass AND attname='embedding'")
+                old_dim = cur.fetchone()
+                if old_dim and int(old_dim[0]) != int(self.vector_dim):
+                    print(f"[pgvector] 向量列维度从 {int(old_dim[0])} 变为 {self.vector_dim}，重建该列"
+                          f"（向量需重新索引）")
+                    cur.execute("ALTER TABLE kb_embeddings DROP COLUMN embedding")
+                    cur.execute(f"ALTER TABLE kb_embeddings ADD COLUMN embedding vector({self.vector_dim})")
+            return
+        if self.pgvector_available and self.vector_dim > 0:
+            cur.execute(
+                f"CREATE TABLE IF NOT EXISTS kb_embeddings ("
+                f"  chunk_id   TEXT PRIMARY KEY,"
+                f"  kb_version TEXT NOT NULL DEFAULT '',"
+                f"  model      TEXT NOT NULL DEFAULT '',"
+                f"  dim        INTEGER NOT NULL DEFAULT 0,"
+                f"  embedding  vector({self.vector_dim}),"
+                f"  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+            self.embedding_column = "vector"
+        else:
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS kb_embeddings ("
+                "  chunk_id   TEXT PRIMARY KEY,"
+                "  kb_version TEXT NOT NULL DEFAULT '',"
+                "  model      TEXT NOT NULL DEFAULT '',"
+                "  dim        INTEGER NOT NULL DEFAULT 0,"
+                "  embedding  JSONB NOT NULL DEFAULT '[]'::jsonb,"
+                "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+            self.embedding_column = "jsonb"
+
+    def upsert_kb_embedding(self, chunk_id, kb_version, model, vector) -> None:
+        vec = [float(x) for x in vector]
+        with self.conn.cursor() as cur:
+            if self.embedding_column == "vector":
+                cur.execute(
+                    "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, embedding, updated_at) "
+                    "VALUES(%s,%s,%s,%s, CAST(%s AS vector), now()) "
+                    "ON CONFLICT(chunk_id) DO UPDATE SET kb_version=excluded.kb_version, "
+                    "model=excluded.model, dim=excluded.dim, embedding=excluded.embedding, updated_at=now()",
+                    (chunk_id, kb_version, model, len(vec),
+                     "[" + ",".join(f"{x:.6f}" for x in vec) + "]"),
+                )
+            else:
+                from psycopg.types.json import Json
+                cur.execute(
+                    "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, embedding, updated_at) "
+                    "VALUES(%s,%s,%s,%s,%s, now()) "
+                    "ON CONFLICT(chunk_id) DO UPDATE SET kb_version=excluded.kb_version, "
+                    "model=excluded.model, dim=excluded.dim, embedding=excluded.embedding, updated_at=now()",
+                    (chunk_id, kb_version, model, len(vec), Json(vec)),
+                )
+
+    def list_kb_embeddings(self, kb_version=None):
+        sql, params = "SELECT chunk_id, model, embedding FROM kb_embeddings", []
+        if kb_version:
+            sql += " WHERE kb_version=%s"
+            params.append(kb_version)
+        sql += " ORDER BY chunk_id"
+        out = []
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
+            for chunk_id, model, raw in cur.fetchall():
+                if isinstance(raw, str):
+                    try:
+                        vec = json.loads(raw)
+                    except (TypeError, ValueError):
+                        vec = []
+                elif isinstance(raw, (list, tuple)):
+                    vec = list(raw)
+                else:
+                    vec = []
+                out.append((chunk_id, model, [float(x) for x in vec]))
+        return out
+
+    def clear_kb_embeddings(self, kb_version=None) -> None:
+        with self.conn.cursor() as cur:
+            if kb_version:
+                cur.execute("DELETE FROM kb_embeddings WHERE kb_version=%s", (kb_version,))
+            else:
+                cur.execute("DELETE FROM kb_embeddings")
 
     def issue_gate_token(self, token: GateToken) -> None:
         with self.conn.cursor() as cur:

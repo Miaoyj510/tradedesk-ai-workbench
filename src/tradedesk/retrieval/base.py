@@ -50,8 +50,15 @@ class Retriever(Protocol):
 
 
 class Embedder(Protocol):
-    """嵌入器接口：S4 接 BGE-M3（多语种稠密向量）。"""
+    """嵌入器接口：S4 接真实嵌入模型（BGE-M3 或云端嵌入 API）。
+
+    两个必须声明的属性：
+      name    —— 嵌入实现名（写进评测报告，不得省略）
+      semantic —— **是否真的具备语义能力**。假嵌入（哈希/占位）必须为 False：
+               管线看到它就不得开启精确语义召回，也不得在评测里报语义能力的数字（PRD 9.5 两层口径）。
+    """
 
     name: str
+    semantic: bool
 
     def embed(self, texts: List[str]) -> List[List[float]]: ...
