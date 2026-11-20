@@ -2,7 +2,7 @@
 #
 # ⚠ 本机现状：Docker Hub 拉取被网络阻断（registry-1.docker.io 不可达），
 #   因此使用本机**已缓存**的 postgres:16-alpine 与 redis:7-alpine 镜像。
-#   pgvector 扩展在 S4 阶段通过本地构建镜像接入（见 docker/pgvector/Dockerfile）。
+#   pgvector 扩展在 S4 阶段通过本地构建镜像接入（见 docker/pgvector/Dockerfile），已完成。
 #
 # 启动：docker compose up -d db redis
 # 停止：docker compose down
@@ -10,7 +10,10 @@ name: tradedesk
 
 services:
   db:
-    image: postgres:16-alpine          # 本机已缓存；S4 起替换为本地构建的 pgvector 镜像
+    # S4 起换成本地构建的 pgvector 镜像（带 vector 扩展）。
+    # 构建：docker build -t tradedesk/pgvector:pg16 -f docker/pgvector/Dockerfile .
+    # 镜像已在本机构建好；首次使用前先跑一次上面的 build。
+    image: tradedesk/pgvector:pg16
     container_name: tradedesk-db
     restart: unless-stopped
     environment:

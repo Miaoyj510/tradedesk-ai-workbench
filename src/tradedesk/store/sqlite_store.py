@@ -78,6 +78,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     hash       TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS kb_embeddings (
+    chunk_id   TEXT PRIMARY KEY,
+    kb_version TEXT NOT NULL DEFAULT '',
+    model      TEXT NOT NULL DEFAULT '',
+    dim        INTEGER NOT NULL DEFAULT 0,
+    vector     TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS kb_chunks (
     chunk_id        TEXT PRIMARY KEY,
     doc_id         TEXT NOT NULL,
@@ -268,6 +276,43 @@ class SqliteStateStore:
     def clear_kb(self) -> None:
         with self._write_lock:
             self._conn.execute("DELETE FROM kb_chunks")
+            self._conn.execute("DELETE FROM kb_embeddings")
+            self._conn.commit()
+
+    # ---------- 向量（S4） ----------
+    def upsert_kb_embedding(self, chunk_id, kb_version, model, vector) -> None:
+        with self._write_lock:
+            self._conn.execute(
+                "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, vector, updated_at) "
+                "VALUES(?,?,?,?,?,?) ON CONFLICT(chunk_id) DO UPDATE SET "
+                "kb_version=excluded.kb_version, model=excluded.model, dim=excluded.dim, "
+                "vector=excluded.vector, updated_at=excluded.updated_at",
+                (chunk_id, kb_version, model, len(vector), _dumps([float(x) for x in vector]),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def list_kb_embeddings(self, kb_version=None):
+        sql, params = "SELECT chunk_id, model, vector FROM kb_embeddings", []
+        if kb_version:
+            sql += " WHERE kb_version=?"
+            params.append(kb_version)
+        sql += " ORDER BY chunk_id"
+        out = []
+        for row in self._conn.execute(sql, params).fetchall():
+            try:
+                vec = json.loads(row["vector"])
+            except (TypeError, ValueError):
+                vec = []
+            out.append((row["chunk_id"], row["model"], [float(x) for x in vec]))
+        return out
+
+    def clear_kb_embeddings(self, kb_version=None) -> None:
+        with self._write_lock:
+            if kb_version:
+                self._conn.execute("DELETE FROM kb_embeddings WHERE kb_version=?", (kb_version,))
+            else:
+                self._conn.execute("DELETE FROM kb_embeddings")
             self._conn.commit()
 
     # ---------- 演练与验证辅助（生产也可用：篡改演练、令牌过期演练） ----------

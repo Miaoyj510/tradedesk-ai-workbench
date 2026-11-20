@@ -1,24 +1,237 @@
 # -*- coding: utf-8 -*-
-"""嵌入器接口占位：S4 接 BGE-M3（多语种稠密向量）。
+"""嵌入器实现（S4-4a）。
 
-为什么现在不接
---------------
-本机无 GPU（Iris Xe 共享显存 128MB）、16GB 内存，跑 BGE-M3 的 CPU 推理会拖慢检索；
-而且 Docker Hub 拉不到模型镜像。S4 会用「ONNX 量化版 / 远端嵌入 API / pgvector」
-三条候选之一，并在此接口后面做替换（PRD 13.4.5 选型轴③）。
+三个实现，一个协议（`retrieval/base.py` 的 `Embedder`）：
+
+| 实现 | 语义能力 | 用途 |
+| --- | --- | --- |
+| `RemoteEmbedder` | ✓ 真语义 | 云端嵌入 API（MiniMax / OpenAI 兼容）——生产与测试的真实语义通道 |
+| `HashEmbedder` | ✗ 假 | 离线确定性嵌入（字符 n-gram 哈希）——只用于测试与“接线”，**不具备语义能力** |
+| `NullEmbedder` | ✗ 假 | 占位（旧接口保留） |
+
+为什么这个接口里要加 `semantic` 标志位
+--------------------------------
+PRD 9.5 的两层口径写得很清楚：公开检索基准（MIRACL/MLDR/…）只能证明“检索管线没问题”，
+证明不了“询盘场景做得好”。同理，假嵌入也不能被冒充语义召回能力。
+所以每个嵌入器都必须声明自己**到底有没有语义能力**，管线里看到 `semantic=False`
+就不得开启精确语义召回、不得在评测里报语义能力的数字。
 """
 from __future__ import annotations
 
-from typing import List
+import hashlib
+import json
+import math
+import time
+import urllib.error
+import urllib.request
+from typing import Callable, List, Optional, Sequence
+
+
+class EmbeddingError(RuntimeError):
+    """嵌入 API 调用失败。"""
+
+
+def _normalize(vec: List[float]) -> List[float]:
+    """L2 归一：使余弦相似度可以取内积（向量与模长无关）。"""
+    norm = math.sqrt(sum(x * x for x in vec))
+    if norm <= 0:
+        return [0.0] * len(vec)
+    return [x / norm for x in vec]
+
+
+def cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    """余弦相似度（两边都已归一时，就是点积）。"""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    return sum(x * y for x, y in zip(a, b))
+
+
+# ---------------------------------------------------------------------------
+# 云端嵌入 API
+# ---------------------------------------------------------------------------
+# transport 类型：(url, headers, payload, timeout) -> 响应的 JSON dict。
+# 注入这个口的目的是让脚本在**不联网**的情况下也能测请求体与错误处理。
+Transport = Callable[[str, dict, dict, int], dict]
+
+
+def _urllib_transport(url: str, headers: dict, payload: dict, timeout: int) -> dict:
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+class RemoteEmbedder:
+    """云端嵌入客户端（MiniMax 主流，也支持 OpenAI 兼容形态）。
+
+    为什么走云端而不是本地 BGE-M3
+    --------------------------
+    本机没有可用 GPU（Intel Iris Xe 共享显存 128MB）、16GB 内存，BGE-M3 的 CPU 推理会把检索拖成主功能的阻塞项；
+    而且 Docker Hub 拉不到模型镜像。PRD 13.4.5 选型轴③允许替换嵌入实现（接口不变），
+    这里就是那个接口后面的可替换实现。**模型口径与 PRD 写的 BGE-M3 不同，要在评测报告里写清。**
+
+    MiniMax 接口要点
+    ------------------
+    - 地址：`{base_url}/v1/embeddings`（国内 `api.minimaxi.com`，国际 `api.minimax.chat`）
+    - 鉴权：`Authorization: Bearer <key>`（**失败时 HTTP 仍是 200**，真正的错误在 `base_resp.status_code` 里）
+    - 请求体：`{"model": "embo-01", "texts": [...], "type": "db"|"query"}`
+    """
+
+    name = "remote"
+    semantic = True
+
+    def __init__(self, base_url: str, api_key: str, model: str = "embo-01",
+                 dim: int = 1024, timeout_s: int = 30, retries: int = 2,
+                 batch_size: int = 16, provider: str = "minimax",
+                 group_id: str = "", transport: Optional[Transport] = None) -> None:
+        if not base_url:
+            raise ValueError("RemoteEmbedder 需要 base_url")
+        if not api_key:
+            raise ValueError("RemoteEmbedder 需要 api_key")
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
+        self.model = model
+        self.dim = dim
+        self.timeout_s = timeout_s
+        self.retries = max(0, retries)
+        self.batch_size = max(1, batch_size)
+        self.provider = provider
+        self.group_id = group_id
+        self._transport = transport or _urllib_transport
+        self.calls = 0          # 调用计数，用于计量与成本监控
+
+    # ---- 请求组装 ----
+    def _url(self) -> str:
+        url = f"{self.base_url}/v1/embeddings"
+        if self.provider == "minimax" and self.group_id:
+            url = f"{url}?GroupId={self.group_id}"
+        return url
+
+    def _payload(self, texts: List[str], kind: str) -> dict:
+        if self.provider == "openai":
+            return {"model": self.model, "input": texts}
+        return {"model": self.model, "texts": texts, "type": "db" if kind == "doc" else "query"}
+
+    def _headers(self) -> dict:
+        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+    # ---- 响应解析 ----
+    @staticmethod
+    def _parse(resp: dict) -> List[List[float]]:
+        """容忍多种返回形态，但**不容忍错误被当成结果**。"""
+        if not isinstance(resp, dict):
+            raise EmbeddingError(f"嵌入 API 返回不是 JSON 对象：{str(resp)[:120]}")
+        base = resp.get("base_resp") or {}
+        code = base.get("status_code")
+        if code not in (None, 0):
+            raise EmbeddingError(f"嵌入 API 报错：{code} {base.get('status_msg', '')}")
+        data = resp.get("data")
+        vectors: List[List[float]] = []
+        if isinstance(data, list) and data:
+            for item in data:
+                vec = item.get("embedding") if isinstance(item, dict) else None
+                if isinstance(vec, list):
+                    vectors.append([float(x) for x in vec])
+        elif isinstance(resp.get("embeddings"), list):
+            vectors = [[float(x) for x in v] for v in resp["embeddings"]]
+        elif isinstance(resp.get("vectors"), list):
+            vectors = [[float(x) for x in v] for v in resp["vectors"]]
+        if not vectors:
+            raise EmbeddingError(f"嵌入 API 响应里没有向量：{str(resp)[:160]}")
+        return vectors
+
+    def _post(self, texts: List[str], kind: str) -> List[List[float]]:
+        url = self._url()
+        payload = self._payload(texts, kind)
+        headers = self._headers()
+        last_err: Optional[Exception] = None
+        for attempt in range(self.retries + 1):
+            try:
+                self.calls += 1
+                resp = self._transport(url, headers, payload, self.timeout_s)
+                return self._parse(resp)
+            except EmbeddingError:
+                raise                       # 业务错误（如 key 无效）不重试
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last_err = exc
+                if attempt < self.retries:
+                    time.sleep(0.4 * (attempt + 1))
+        raise EmbeddingError(f"嵌入 API 调用失败（已重试 {self.retries} 次）：{last_err}")
+
+    # ---- 对外接口 ----
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        """批量嵌入文本（文档类，type=db）。"""
+        if not texts:
+            return []
+        out: List[List[float]] = []
+        for i in range(0, len(texts), self.batch_size):
+            batch = texts[i:i + self.batch_size]
+            vecs = self._post(batch, "doc")
+            if len(vecs) != len(batch):
+                raise EmbeddingError(f"嵌入 API 返回数量不匹配：请求 {len(batch)} 条，返回 {len(vecs)} 条")
+            for v in vecs:
+                if len(v) != self.dim:
+                    raise EmbeddingError(f"嵌入维度与预期不符：预期 {self.dim}，实际 {len(v)}")
+                out.append(_normalize(v))
+        return out
+
+    def embed_query(self, text: str) -> List[float]:
+        """单条查询嵌入（ctype=query）。"""
+        vecs = self._post([text], "query")
+        if not vecs:
+            raise EmbeddingError("嵌入 API 没有返回查询向量")
+        return _normalize(vecs[0])
+
+
+# ---------------------------------------------------------------------------
+# 离线确定性嵌入（测试与接线用）
+# ---------------------------------------------------------------------------
+class HashEmbedder:
+    """确定性的字符 n-gram 哈希嵌入。
+
+    **不具备语义能力**（`semantic = False`）：它只能把相同的字符片段映射到相近的桶里，
+    对“同义改写”、“跨语种同义”一概无助。用途：
+      - 无云端 key 时让向量通道一路能跑通（接线、表格、索引的测试）；
+      - 单元测试里提供稳定可预期的向量。
+    """
+
+    name = "hash"
+    semantic = False
+
+    def __init__(self, dim: int = 256, ngram: int = 3) -> None:
+        if dim <= 0:
+            raise ValueError("dim 必须为正整数")
+        self.dim = dim
+        self.ngram = ngram
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        out = []
+        for t in texts:
+            from .lexical import normalize_text
+            s = normalize_text(t).replace(" ", "")
+            vec = [0.0] * self.dim
+            if s:
+                grams = [s[i:i + self.ngram] for i in range(max(0, len(s) - self.ngram + 1))]
+                for g in grams:
+                    h = hashlib.blake2b(g.encode("utf-8"), digest_size=8).digest()
+                    idx = int.from_bytes(h[:4], "big") % self.dim
+                    sign = 1.0 if h[4] % 2 == 0 else -1.0
+                    vec[idx] += sign
+            out.append(_normalize(vec))
+        return out
+
+    def embed_query(self, text: str) -> List[float]:
+        return self.embed([text])[0]
 
 
 class NullEmbedder:
     """占位实现：不产出向量，只把文本按字符 n-gram 稀疏化。
 
-    它让"稠密通道"在管线里真实存在（可被 RRF 融合），但**不代表语义检索能力**。
+    它让“稠密通道”在管线里真实存在（可被 RRF 融合），但**不代表语义检索能力**。
     """
 
     name = "null-embedder"
+    semantic = False
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         from .lexical import char_ngrams

@@ -16,6 +16,7 @@ from ..agents.sentinel import SentinelAgent
 from ..config import Config, get_settings
 from ..runtime.gates import GateTokenService
 from ..retrieval.store_retriever import StoreRetriever
+from ..retrieval.indexer import index_kb, load_index
 from ..runtime.supervisor import Supervisor
 from ..store.base import StateStore
 from ..store.sqlite_store import SqliteStateStore
@@ -34,6 +35,19 @@ def build_registry(retriever=None) -> Registry:
 class AppContext:
     """把依赖装到一个对象里，测试时方便替换。"""
 
+    def _build_embedder(self):
+        """按配置建嵌入器；未开启或没有 key 就返回 None。"""
+        cfg = self.config
+        if not getattr(cfg, "embedder_enabled", False):
+            return None
+        if not cfg.llm_api_key:
+            return None
+        from ..retrieval.embedders import RemoteEmbedder
+        return RemoteEmbedder(base_url=cfg.embedder_base_url, api_key=cfg.llm_api_key,
+                              model=cfg.embedding_model, dim=cfg.embedding_dim,
+                              timeout_s=cfg.llm_timeout_s, batch_size=cfg.embedder_batch_size,
+                              provider=cfg.embedder_provider)
+
     def __init__(self, store: StateStore, registry: Optional[Registry] = None,
                  config: Optional[Config] = None) -> None:
         self.store = store
@@ -48,6 +62,18 @@ class AppContext:
             # 灌种子失败不阻断启动：检索层降级为"空库"，Agent 走低置信兜底
             print(f"[deps] 知识库种子灌入失败（检索将返回空结果）：{exc}")
         self.retriever = StoreRetriever(self.store, self.kb_version)
+        # 向量通道（S4）：只在显式开启且拿得到 key 时才建，
+        # 否则启动会去调云端 API（计费）；索引失败也不阻断启动 ——
+        # 检索层降级为词法 + 结构化双通道，且不得对外宣称有语义召回能力。
+        self.embedder = self._build_embedder()
+        self.vector_index = None
+        if self.embedder is not None:
+            try:
+                stats = index_kb(self.store, self.embedder, self.kb_version)
+                self.vector_index = load_index(self.store, self.kb_version)
+                print(f"[deps] 向量索引就绪：{stats} 模型 {self.embedder.name}")
+            except Exception as exc:
+                print(f"[deps] 向量索引失败（检索降级为词法+结构化双通道）：{exc}")
         self.registry = registry or build_registry(retriever=self.retriever)
         self.tokens = GateTokenService(store, ttl_seconds=self.config.gate_token_ttl_s)
         self.supervisor = Supervisor(
