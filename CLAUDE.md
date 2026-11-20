@@ -95,6 +95,12 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
   Docker Hub 拉不到不可用 `postgresql16-pgvector`；从源码编译时 PGXS 要生成位码，需要 **clang21/llvm21**（`NO_BC=1` 对它无效）。
 - **嵌入默认关闭**：`TRADEDESK_EMBEDDER_ENABLED=1` + `MINIMAX_API_KEY` 才会调云端 API（启动即计费）。
 - **pgvector 的 `vector(N)` 列会拒绝错误维度**：换嵌入模型维度不同时要重建列（换模型时分步切换）。
+- **向量索引是显式动作**：`dev.ps1 index`（或 `scripts/index_kb.py`）。应用启动**只读**索引，不自动建
+  —— 否则每个审核脚本都要重新调云端 API 重新嵌入全部块（计费 + 慢）。
+- **`embo-01` 实测 1536 维**（不是文档常见的 1024）；响应里是 `vectors` 而不是 `data[].embedding`。
+- **`embo-01` 跨语种对齐弱**：zh↔es/ar 余弦相似度约 -0.02（无关）——四语分块与术语表桥接是必需的，不是优化。
+- **向量检索分不清型号**（型号号是弱信号）——型号识别的唯一权威是**结构化通道**，
+  融合时稠密通道的 RRF 参数必须大于结构化通道（见 docs/S4-ACCEPTANCE.md 第三节）。
 - **`list_kb_chunks` 必须有 `ORDER BY chunk_id`**：PostgreSQL 更新一行后那行会被挤到堆尾，不排序就不能靠顺序猜块。
 - **产品必须被结构化通道确认才进草稿**：只靠词法命中的产品不许报型号与价格，
   否则"给我个最好价"会被随便挑一个产品并报价。

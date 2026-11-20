@@ -470,6 +470,17 @@ class PostgresStateStore:
         row = cur.fetchone()
         if row is not None:
             self.embedding_column = "vector" if str(row[0]).lower() == "vector" else "jsonb"
+            if self.embedding_column == "vector" and self.vector_dim > 0:
+                # 现有 vector(N) 的 N 与当前嵌入模型不一致 → 重建该列。
+                # 向量是**派生数据**（可从知识块重新算出），不是业务数据，所以直接重建列。
+                cur.execute("SELECT atttypmod FROM pg_attribute "
+                            "WHERE attrelid='kb_embeddings'::regclass AND attname='embedding'")
+                old_dim = cur.fetchone()
+                if old_dim and int(old_dim[0]) != int(self.vector_dim):
+                    print(f"[pgvector] 向量列维度从 {int(old_dim[0])} 变为 {self.vector_dim}，重建该列"
+                          f"（向量需重新索引）")
+                    cur.execute("ALTER TABLE kb_embeddings DROP COLUMN embedding")
+                    cur.execute(f"ALTER TABLE kb_embeddings ADD COLUMN embedding vector({self.vector_dim})")
             return
         if self.pgvector_available and self.vector_dim > 0:
             cur.execute(
