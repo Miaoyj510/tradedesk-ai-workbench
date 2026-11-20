@@ -17,7 +17,6 @@ import re
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
-from ..data.seed import demo_certificates, demo_products
 from ..retrieval.base import SearchQuery
 from ..domain.agentspec import AgentSpec, AgentStatus, ToolMode, ToolSpec
 from ..domain.enums import Intent, Language
@@ -133,36 +132,12 @@ class InquiryAgent(BaseAgent):
     def __init__(self, retriever=None) -> None:
         super().__init__(INQUIRY_SPEC)
         self.retriever = retriever
-        self.products = demo_products()
-        self.certificates = demo_certificates()
 
     # ---- 证据装配 ----
-    def _match_products(self, message: str) -> List[dict]:
-        found = []
-        for sku in SKU_PATTERN.findall(message or ""):
-            for p in self.products:
-                if p["sku"].upper() == sku.upper():
-                    found.append(p)
-        if not found:
-            # 没写型号时按关键词猜一次（只猜唯一命中的），猜不到就留空
-            text = (message or "").lower()
-            hits = [p for p in self.products
-                    if any(k in text for k in (p["name"]["en"].lower().split()[-1],
-                                              p["name"]["es"].lower().split()[-1]))]
-            found = hits[:1]
-        return found
-
-    def _citations_for(self, products: List[dict]) -> List[Citation]:
-        cites: List[Citation] = []
-        for p in products:
-            cites.append(Citation(citation_id=f"SKU {p['sku']} v1", type="产品条目",
-                                  note=f"{p['material']} · MOQ {p['moq']} · 交期 {p['lead_time_days']} 天"))
-            for cert_no in p["certificates"]:
-                c = next((x for x in self.certificates if x["cert_no"] == cert_no), None)
-                if c:
-                    cites.append(Citation(citation_id=c["cert_no"], type="证书",
-                                          note=f"{c['type']} · 有效期至 {c['valid_until']} · {c['issuer']}"))
-        return cites
+    # R11-05 / R11-06：**不再有"写死常量"这条兜底路径**。
+    # 知识库是价格、规格、证书的唯一真源：检索没确认产品就只发追问，宁可少答一句，
+    # 也不猜型号与报价。旧兜底会报出 S1 时代的 "SKU X-200 v1" —— 那个标识在知识库里
+    # 查不到，等于给买家一条断链的引用。
 
     # ---- 检索取证（S3）----
     def _retrieve(self, request: AgentRequest):
@@ -201,8 +176,9 @@ class InquiryAgent(BaseAgent):
                 hits, product=product_chunk,
                 buyer_country=str((request.context.get("customer") or {}).get("country", "")))
         else:
-            products = self._match_products(message)
-            citations = self._citations_for(products)
+            # 检索没确认产品 → 只发追问（R11-05：不得回退到写死常量报型号与价格）
+            products = []
+            citations = []
 
         # 置信度：命中产品 + 证据越多越可信；无证据 → 低置信（走 GATE-06）
         confidence = 0.35 + (0.25 if products else 0.0) + min(0.25, 0.05 * len(citations))
@@ -224,22 +200,12 @@ class InquiryAgent(BaseAgent):
         # 证书行：只认**未过期**的证书（过期证书不得出现在对外内容里）
         cert_line = "—"
         expired_notes = []
-        cert_candidates = []
-        if product_chunk is not None:
-            cert_candidates = [h.chunk for h in hits if h.chunk.doc_type == "证书"]
-        else:
-            cert_candidates = []
-            for cert_no in p.get("certificates", []):
-                c = next((x for x in self.certificates if x["cert_no"] == cert_no), None)
-                if c:
-                    cert_candidates.append(c)
+        # 证书只从检索命中里取（不再有写死清单）
+        cert_candidates = [h.chunk for h in hits if h.chunk.doc_type == "证书"]
         for c in cert_candidates:
-            if isinstance(c, dict):
-                cert_no, ctype, valid_until = c["cert_no"], c["type"], c["valid_until"]
-            else:
-                cert_no = c.identifiers.get("cert_no", c.doc_id)
-                ctype = c.extra.get("cert_type", "证书")
-                valid_until = c.valid_until.date().isoformat() if c.valid_until else "—"
+            cert_no = c.identifiers.get("cert_no", c.doc_id)
+            ctype = c.extra.get("cert_type", "证书")
+            valid_until = c.valid_until.date().isoformat() if c.valid_until else "—"
             if isinstance(valid_until, str) and valid_until < date.today().isoformat():
                 expired_notes.append(f"{cert_no} 已于 {valid_until} 过期，不予引用")
                 continue
@@ -286,7 +252,12 @@ class InquiryAgent(BaseAgent):
                 if sku and covers and sku.upper() not in covers:
                     continue        # 与本型号无关的证书不引用
             if c.doc_type == "法规条款":
-                if country and c.countries and country not in [x.upper() for x in c.countries]:
+                # 国别未知 → 一条**国别专属**条款都不能进对外内容（R11-03）：
+                # 一封报价同时承诺欧盟/埃及/巴西三国的合规要求，是对买家的失真陈述。
+                if not country:
+                    if c.countries:
+                        continue
+                elif c.countries and country not in [x.upper() for x in c.countries]:
                     continue        # 不适用于买家国别的法规不引用
                 if hs and c.hs_codes and not (hs & set(c.hs_codes)):
                     continue

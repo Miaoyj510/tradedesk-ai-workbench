@@ -285,19 +285,27 @@ class RetrievalPipeline:
 
     # ---- 步骤 5：双通道召回
     def retrieve(self, query: SearchQuery, tokens: List[str]) -> Dict[str, List[SearchHit]]:
-        lexical = _lexical_hits(self.chunks, tokens)
+        # 与 search() 同口径：属性过滤对两个通道同样生效
+        kept, _ = self.filter(query)
+        scope = kept
+        lexical = _lexical_hits(scope, tokens)
         return {"lexical": lexical[: max(query.top_k * 3, 10)],
-                "structured": _structured_hits(self.chunks, query)}
+                "structured": _structured_hits(scope, query)}
 
     # ---- 主流程
     def search(self, query: SearchQuery) -> List[SearchHit]:
         today = query.today or date.today()
         concepts, tokens = self.enrich(query.text)
         kept, dropped = self.filter(query)
-        # 只在"未被属性过滤掉"的块上打分，但结构化通道仍看全集（编号可能不在过滤结果里）
-        scope = kept if kept else self.chunks
+        # 属性过滤是**硬约束**，两个通道一视同仁（R11-01 / R11-02）：
+        # 过期、别国、HS 不对的块都不参与召回。
+        # 过滤后为空就返回空 —— 不能"那就不滤了"：那等于让 HS 编码不匹配的产品
+        # 照样被检索出来、报上价格。
+        if not kept:
+            return []
+        scope = kept
         lexical = _lexical_hits(scope, tokens, concepts)[: max(query.top_k * 3, 10)]
-        structured = _structured_hits(self.chunks, query)
+        structured = _structured_hits(scope, query)
         # 精确匹配通道权重更高（k=10 vs 词法 k=60）
         merged = rrf_merge([lexical, structured], k_by_channel=[60, 10])
         # 步骤 7：引用装配 + 时效标注
