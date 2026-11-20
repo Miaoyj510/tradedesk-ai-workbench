@@ -415,10 +415,12 @@ class PostgresStateStore:
             )
 
     def list_kb_chunks(self, kb_version=None):
+        # 按 chunk_id 排序（说明见 sqlite_store）：更新行会被挤到堆尾，不排序就不能靠序号定位块。
         sql, params = "SELECT * FROM kb_chunks", []
         if kb_version:
             sql += " WHERE kb_version=%s"
             params.append(kb_version)
+        sql += " ORDER BY chunk_id"
         with self.conn.cursor() as cur:
             cur.execute(sql, params)
             rows = cur.fetchall()

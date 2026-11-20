@@ -237,10 +237,13 @@ class SqliteStateStore:
             self._conn.commit()
 
     def list_kb_chunks(self, kb_version=None):
+        # 按 chunk_id 排序：不排序时行序取决于写入顺序，而一条记录被更新后会被挤到末尾 ——
+        # “哪个块是这个型号的规格记录”不能靠序号猜（PostgreSQL 更新行会移到堆尾）。
         sql, params = "SELECT * FROM kb_chunks", []
         if kb_version:
             sql += " WHERE kb_version=?"
             params.append(kb_version)
+        sql += " ORDER BY chunk_id"
         rows = self._conn.execute(sql, params).fetchall()
         return [
             KBChunk(

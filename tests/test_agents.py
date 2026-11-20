@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """Agent 层：AgentSpec 自洽性、意图分类、证据装配、风控核验、仅声明角色。"""
+import re
+
 import pytest
 
 from tradedesk.agents.base import AgentRequest, AgentStatus as ResultStatus
@@ -87,11 +89,38 @@ def test_inquiry_produces_draft_with_citations(kb_agent):
     agent = kb_agent
     res = agent.handle(AgentRequest(
         thread=_thread(), language=Language.EN,
+        context={"customer": {"country": "BR"}},
         message="Quote 5000 pcs of X-200 FOB Shenzhen, do you have CE certification?"))
     assert res.status is ResultStatus.OK
     assert res.draft is not None
     assert res.draft.citations, "草稿必须带引用"
     assert res.confidence >= 0.55
+
+
+def test_inquiry_unknown_country_needs_human(kb_agent):
+    """买家所在国未知 → 必须转人工（R12-03）。
+
+    合规要求按目的国落地，国别未知就签核 = 签了一份没核对的合规声明。
+    """
+    res = kb_agent.handle(AgentRequest(
+        thread=_thread(), language=Language.EN,
+        message="Quote 5000 pcs of X-200 FOB Shenzhen, what certifications do we need?"))
+    assert res.status is ResultStatus.NEED_HUMAN
+    assert res.draft is not None and res.draft.needs_human_confirmation
+    assert "目的港" in res.draft.next_action
+
+
+def test_inquiry_cert_line_only_from_product_certificates(kb_agent):
+    """正文里的证书只能是**该型号的结构化证书列表**里的那几张（R12-01/02）。"""
+    res = kb_agent.handle(AgentRequest(
+        thread=_thread(), language=Language.EN,
+        context={"customer": {"country": "BR"}},
+        message="Quote 5000 pcs of X-200 FOB Shenzhen, do you have CE certification?"))
+    body = res.draft.body
+    assert "CERT-CE-2041" in body
+    assert "CERT-ISO-9001" not in body, "体系证书不得被说成型号的认证（R11-10）"
+    for cert_no in re.findall(r"(?:CERT|TC)-[A-Z0-9-]+", body):
+        assert cert_no in ("CERT-CE-2041",), f"正文出现了非该型号的证书：{cert_no}"
 
 
 def test_inquiry_missing_product_asks_instead_of_guessing():

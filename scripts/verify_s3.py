@@ -81,6 +81,31 @@ def scenario_1_kb(store) -> None:
     no_id = [c.chunk_id for c in chunks if not c.identifiers]
     check("每块都有可回指标识（无标识块 = 0）", not no_id, str(no_id))
     check("每块都有库版本", all(c.kb_version == KB_VERSION for c in chunks))
+    # 数值的唯一真源：每个型号恰好一条结构化规格记录
+    spec = [c for c in chunks if c.doc_type == "产品规格"]
+    skus = {c.identifiers.get("sku") for c in spec}
+    per_sku_spec = {}
+    for c in spec:
+        per_sku_spec.setdefault(c.identifiers.get("sku"), []).append(c.chunk_id)
+    check("每个型号恰好一条结构化规格记录（数值唯一真源）",
+          all(len(v) == 1 for v in per_sku_spec.values()) and len(per_sku_spec) >= 3,
+          str(per_sku_spec))
+    # 数值不得进文本块（PRD 9.3：规格参数走属性过滤）
+    numeric_in_text = []
+    for c in chunks:
+        t = c.text
+        for key in ("price_low", "lead_time_days", "moq"):
+            v = c.extra.get(key)
+            if v and str(v) in t:
+                numeric_in_text.append(f"{c.chunk_id}:{key}")
+    check("产品属性数值不进文本块", not numeric_in_text, str(numeric_in_text))
+    # 同一型号 4 语版本分别入库（FR-KB-01）
+    per_sku_lang = {}
+    for c in chunks:
+        if c.doc_type == "产品条目":
+            per_sku_lang.setdefault(c.identifiers.get("sku"), []).append(c.lang)
+    multi = {k: sorted(set(v)) for k, v in per_sku_lang.items() if len(set(v)) >= 4}
+    check("同一型号的 4 语版本分别入库", bool(multi), str(per_sku_lang))
 
 
 def scenario_2_terms() -> None:
@@ -185,22 +210,21 @@ def scenario_8_data_from_kb(store) -> None:
     body_before = before["draft"]["body"] if before.get("draft") else ""
     check("草稿价格取自知识库", "12.3" in body_before, body_before[:120])
 
-    # 改知识库里的价格，再来一单
+    # 改知识库里的价格，再来一单。**同一个进程**内就要生效（R11-07）
     chunk = next(c for c in store.list_kb_chunks(KB_VERSION) if c.identifiers.get("sku") == "X-300")
     extra = dict(chunk.extra); extra["price_low"] = 9.99
     chunk.extra = extra
     store.upsert_kb_chunk(chunk)
-    from fastapi.testclient import TestClient
-    app2 = create_app(AppContext(store=store))
-    client2 = TestClient(app2)
-    after = client2.post("/inbound", json={
+    after = client.post("/inbound", json={
         "buyer_id": "BY-S3-C", "message": "Quote 100 pcs of X-300 electric pallet truck price please.",
         "language": "en", "company": "Price Co2", "country": "US"}).json()
     body_after = after["draft"]["body"] if after.get("draft") else ""
-    check("改库后草稿价格随之变化", "9.99" in body_after and "12.3" not in body_after, body_after[:120])
+    check("同一进程内改库后草稿价格随之变化",
+          "9.99" in body_after and "12.3" not in body_after, body_after[:120])
 
 
 def scenario_9_api(store) -> None:
+
     section("场景 9 · /kb/search 接口")
     from fastapi.testclient import TestClient
     app = create_app(AppContext(store=store))
@@ -215,6 +239,69 @@ def scenario_9_api(store) -> None:
         check(f"命中含 {key}", key in h)
     check("返回库版本", body.get("kb_version") == KB_VERSION)
 
+
+
+
+def scenario_10_cert_and_country(store) -> None:
+    section("场景 10 · 证书口径与国别未知（R11-10 / R12-01、R12-02 / R12-03）")
+    import re
+    from fastapi.testclient import TestClient
+    from tradedesk.retrieval.store_retriever import StoreRetriever
+
+    app = create_app(AppContext(store=store))
+    client = TestClient(app)
+
+    def ask(buyer, country, message, lang="en"):
+        payload = {"buyer_id": buyer, "message": message, "language": lang,
+                   "company": buyer + " Co", "country": country}
+        return client.post("/inbound", json=payload).json()
+
+    # R12-02：证书不按买家国别过滤 —— BR 买家问 X-200 仍要拿到 X-200 的 CE 证书
+    d = ask("BY-C1", "BR", "Quote 5000 pcs of X-200 FOB Shenzhen, do you have CE certification?")
+    body = d["draft"]["body"]
+    check("BR 买家仍拿到本型号的 CE 证书", "CERT-CE-2041" in body, body[:120])
+    check("体系证书不得被说成型号的认证", "CERT-ISO-9001" not in body, body[:160])
+
+    # R12-01：DE 买家问 M-77，正文里的证书必须覆盖 M-77
+    d2 = ask("BY-C2", "DE", "Quote 500 pcs of M-77 lifting clamp, do you have CE certificate?")
+    body2 = d2["draft"]["body"]
+    named = re.findall(r"(?:CERT|TC)-[A-Z0-9-]+", body2)
+    check("M-77 的正文不出现别型号的证书", "CERT-CE-2041" not in named, str(named))
+    check("M-77 的正文只出现它自己的证书", set(named) <= {"CERT-ISO-9001"}, str(named))
+    cites2 = [c["citation_id"] for c in d2["draft"]["citations"]]
+    check("正文提到的证书都在引用列表里", all(x in cites2 for x in named),
+          f"{named} vs {cites2}")
+
+    # R12-03：国别未知 → 转人工 + 不引用国别专属法规
+    d3 = ask("BY-C3", "", "Quote 5000 pcs of X-200 FOB Shenzhen, what certifications do we need?")
+    cites3 = [c["citation_id"] for c in d3["draft"]["citations"]]
+    check("国别未知时引用里没有国别专属法规",
+          not [x for x in cites3 if x.startswith("REG-")], str(cites3))
+    check("国别未知时草稿标为需人工确认",
+          bool(d3["draft"]["needs_human_confirmation"]),
+          str(d3["draft"].get("needs_human_confirmation")))
+
+    # 未点名型号 → 不猜型号与价格（宁可追问）
+    d4 = ask("BY-C4", "US", "Send me your best price for the manual hydraulic hand truck.")
+    body4 = d4["draft"]["body"] if d4.get("draft") else ""
+    check("未点名型号时不报价格", "USD" not in body4, body4[:100])
+    check("未点名型号时没有引用", not (d4.get("draft") or {}).get("citations"),
+          str((d4.get("draft") or {}).get("citations")))
+
+    # 属性过滤清空不得回退全集（R11-02）
+    r = StoreRetriever(store, KB_VERSION)
+    hs_hits = r.search(SearchQuery(text="M-77 lifting clamp price", lang="en",
+                                    buyer_country="BR", hs_codes=["9999.99"], top_k=8))
+    check("HS 不匹配的型号不得被检索出来",
+          "M-77" not in [h.chunk.identifiers.get("sku") for h in hs_hits],
+          str([h.chunk.identifiers.get("sku") for h in hs_hits]))
+
+    # 结构化通道也不得返回别国法规（R11-01）
+    ae = r.search(SearchQuery(text="REG-AE-099 final user screening requirement", lang="en",
+                              buyer_country="BR", top_k=8))
+    check("结构化通道也不返回别国法规",
+          "REG-AE-099" not in [h.chunk.identifiers.get("clause_no") for h in ae],
+          str([h.chunk.identifiers.get("clause_no") for h in ae]))
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="S3 验证脚本")
@@ -240,6 +327,7 @@ def main() -> int:
         scenario_7_citations(store)
         scenario_8_data_from_kb(store)
         scenario_9_api(store)
+        scenario_10_cert_and_country(store)
     finally:
         store.close()
 
