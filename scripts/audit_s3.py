@@ -390,9 +390,11 @@ def audit_5_structured() -> None:
           "USD" not in body and not cites,
           f"status={d.get('status')} 正文含价格={'USD' in body} 引用={cites}")
     clause("5.4")
-    known = {c2.identifiers.get("cert_no") or c2.identifiers.get("sku")
-             or c2.identifiers.get("clause_no") or c2.identifiers.get("term_id") or c2.doc_id
-             for c2 in store.list_kb_chunks(KB_VERSION)}
+    # known：**所有标识值 + doc_id**。旧写法只收每个块的首个标识（如产品块只有 "X-200"），
+    # 而 R14-03 要求引用标识能唯一定位到一个块（一个 sku 对应 5 个块），
+    # 所以引用用 doc_ref / attr_id 这样的唯一标识 —— 两条断言在旧 known 集合下互相冲突。
+    _chunks_all = store.list_kb_chunks(KB_VERSION)
+    known = {v for c2 in _chunks_all for v in c2.identifiers.values()} | {c2.doc_id for c2 in _chunks_all}
     raw_cites = d["draft"]["citations"] if d.get("draft") else []
     orphan = [x["citation_id"] for x in raw_cites if x["citation_id"] not in known]
     check("走写死兜底路径时产生的引用仍要可回指（FR-KB-07）", not orphan,
@@ -418,9 +420,11 @@ def audit_6_citations() -> None:
                                  "language": "en", "company": "Cite Co"}).json()
     cites = d["draft"]["citations"] if d.get("draft") else []
     body = d["draft"]["body"] if d.get("draft") else ""
-    known = {c2.identifiers.get("cert_no") or c2.identifiers.get("sku")
-             or c2.identifiers.get("clause_no") or c2.identifiers.get("term_id") or c2.doc_id
-             for c2 in store.list_kb_chunks(KB_VERSION)}
+    # known：**所有标识值 + doc_id**。旧写法只收每个块的首个标识（如产品块只有 "X-200"），
+    # 而 R14-03 要求引用标识能唯一定位到一个块（一个 sku 对应 5 个块），
+    # 所以引用用 doc_ref / attr_id 这样的唯一标识 —— 两条断言在旧 known 集合下互相冲突。
+    _chunks_all = store.list_kb_chunks(KB_VERSION)
+    known = {v for c2 in _chunks_all for v in c2.identifiers.values()} | {c2.doc_id for c2 in _chunks_all}
     unknown = [x["citation_id"] for x in cites if x["citation_id"] not in known]
     check("每条引用都有标识且能回指", cites and not unknown, f"unknown={unknown}")
     clause("6.2")

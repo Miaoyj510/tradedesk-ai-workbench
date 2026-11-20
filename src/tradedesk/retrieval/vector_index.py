@@ -12,9 +12,20 @@
 """
 from __future__ import annotations
 
+import math
 from typing import List, Optional, Sequence, Tuple
 
 from .embedders import cosine
+
+
+def _unit(vec: Optional[Sequence[float]]) -> Optional[List[float]]:
+    """归一化；零向量返回 None（无法计算方向）。"""
+    if not vec:
+        return None
+    norm = math.sqrt(sum(x * x for x in vec))
+    if norm <= 0:
+        return None
+    return [x / norm for x in vec]
 
 
 class VectorIndex:
@@ -40,11 +51,16 @@ class VectorIndex:
     def search(self, query: Sequence[float], top_k: int = 10,
                min_score: float = 0.0) -> List[Tuple[str, float]]:
         """返回 [(chunk_id, 余弦相似度)]，按相似度降序。"""
+        # R15-05：计算的是**真余弦**（两边都归一后的点积），不是直接点积 ——
+        # 未归一向量直接点积会算出 9.0 这种超过 1 的“余弦相似度”。
         if not query or not self._ids:
+            return []
+        q = _unit(query)
+        if q is None:
             return []
         scored: List[Tuple[str, float]] = []
         for cid, vec in zip(self._ids, self._vectors):
-            s = cosine(query, vec)
+            s = cosine(q, _unit(vec) or [])
             if s >= min_score:
                 scored.append((cid, round(s, 6)))
         scored.sort(key=lambda x: (-x[1], x[0]))

@@ -58,7 +58,7 @@ S1 收口 → S2 已交卷 → R9 审核（14 个根因）→ R10 全修完
 
 ```powershell
 $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
-& $dev check              # 交付前自检（八步）：语法 + S1 双后端 + S2/S3 自证 + S2/S3 独立审核 + S4 + pytest
+& $dev check              # 交付前自检（九步）：语法 + S1 双后端 + S2/S3 自证 + S2/S3 独立审核 + S4 + pytest
 & $dev verify             # 只跑 S1 验证
 & $dev test               # 只跑 pytest
 & $dev audit              # S2 独立审核（审核方断言）

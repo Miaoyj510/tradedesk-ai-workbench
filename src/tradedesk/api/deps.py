@@ -77,6 +77,10 @@ class AppContext:
             if len(self.vector_index):
                 print(f"[deps] 向量索引已加载：{len(self.vector_index)} 条"
                       f"（需重建时跑 dev.ps1 index）")
+            elif self.store.list_kb_chunks(self.kb_version):
+                # “有块但没有向量”不能静默（R15-04）：否则之后会被误判成“模型不行”
+                print("[deps] 知识库有块但**向量索引为空**（尚未建索引，或维度变了）："
+                      "检索将降级为词法+结构化双通道；建索引跑 dev.ps1 index")
         except Exception as exc:
             print(f"[deps] 向量索引加载失败（检索降级为词法+结构化双通道）：{exc}")
         self.registry = registry or build_registry(retriever=self.retriever)

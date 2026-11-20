@@ -84,8 +84,9 @@ CREATE TABLE IF NOT EXISTS kb_embeddings (
     model      TEXT NOT NULL DEFAULT '',
     dim        INTEGER NOT NULL DEFAULT 0,
     vector     TEXT NOT NULL DEFAULT '[]',
+    content_fp TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT ''
-);
+);;
 CREATE TABLE IF NOT EXISTS kb_chunks (
     chunk_id        TEXT PRIMARY KEY,
     doc_id         TEXT NOT NULL,
@@ -194,6 +195,10 @@ class SqliteStateStore:
         _cols = {r[1] for r in self._conn.execute("PRAGMA table_info(gate_tokens)")}
         if "action" not in _cols:
             self._conn.execute("ALTER TABLE gate_tokens ADD COLUMN action TEXT NOT NULL DEFAULT ''")
+        # 向量表：补 content_fp 列（失效键要含块内容指纹，R15-01）
+        _ecols = {r[1] for r in self._conn.execute("PRAGMA table_info(kb_embeddings)")}
+        if _ecols and "content_fp" not in _ecols:
+            self._conn.execute("ALTER TABLE kb_embeddings ADD COLUMN content_fp TEXT NOT NULL DEFAULT ''")
         cur = self._conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'")
         row = cur.fetchone()
         if row is None:
@@ -274,23 +279,33 @@ class SqliteStateStore:
         return None
 
     def clear_kb(self) -> None:
+        # 重灌秥识块不得连带删向量（R15-02）：向量与块一一对应，
+        # 块没变就不该删向量 —— 否则每次重灌都要全量重嵌（白花钱）。
         with self._write_lock:
             self._conn.execute("DELETE FROM kb_chunks")
-            self._conn.execute("DELETE FROM kb_embeddings")
             self._conn.commit()
 
     # ---------- 向量（S4） ----------
-    def upsert_kb_embedding(self, chunk_id, kb_version, model, vector) -> None:
+    def upsert_kb_embedding(self, chunk_id, kb_version, model, vector, content_fp="") -> None:
         with self._write_lock:
             self._conn.execute(
-                "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, vector, updated_at) "
-                "VALUES(?,?,?,?,?,?) ON CONFLICT(chunk_id) DO UPDATE SET "
+                "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, vector, content_fp, updated_at) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(chunk_id) DO UPDATE SET "
                 "kb_version=excluded.kb_version, model=excluded.model, dim=excluded.dim, "
-                "vector=excluded.vector, updated_at=excluded.updated_at",
+                "vector=excluded.vector, content_fp=excluded.content_fp, updated_at=excluded.updated_at",
                 (chunk_id, kb_version, model, len(vector), _dumps([float(x) for x in vector]),
-                 datetime.now(timezone.utc).isoformat()),
+                 content_fp or "", datetime.now(timezone.utc).isoformat()),
             )
             self._conn.commit()
+
+    def list_kb_embedding_meta(self, kb_version=None):
+        sql, params = "SELECT chunk_id, model, content_fp FROM kb_embeddings", []
+        if kb_version:
+            sql += " WHERE kb_version=?"
+            params.append(kb_version)
+        sql += " ORDER BY chunk_id"
+        return [(r["chunk_id"], r["model"], r["content_fp"])
+                for r in self._conn.execute(sql, params).fetchall()]
 
     def list_kb_embeddings(self, kb_version=None):
         sql, params = "SELECT chunk_id, model, vector FROM kb_embeddings", []

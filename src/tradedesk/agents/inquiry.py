@@ -175,13 +175,24 @@ class InquiryAgent(BaseAgent):
         sku = str(product.identifiers.get("sku", ""))
         # 数值只从**结构化规格记录**取（数值的唯一真源）
         spec = self._fetch_spec(sku, country, request.language.value) if sku else None
+        # 回查到的块可能已在原始命中里（每家问“CE certificate”时词法就命中了它）
+        # —— 直接 append 会让同一张证书在引用列表里出现两次（R14-01），按 chunk_id 去重。
+        seen_chunks = {h.chunk.chunk_id for h in hits}
+
+        def _add(chunk) -> None:
+            if chunk is None or chunk.chunk_id in seen_chunks:
+                return
+            seen_chunks.add(chunk.chunk_id)
+            hits.append(SearchHit(chunk=chunk, score=1.0, channel="structured",
+                                  reasons=[f"结构化命中 {chunk.doc_id}"]))
+
+        # 规格记录也要进 hits：报价里的价格/MOQ/交期就是它的 extra，
+        # 它不在引用列表里就没有可回指的来源（R14-02）。
+        _add(spec)
         cert_nos = ((spec.extra.get("certificates") if spec is not None else None)
                     or product.extra.get("certificates") or [])
         for cert_no in cert_nos:
-            chunk = self._fetch_cert(str(cert_no), country, request.language.value)
-            if chunk is not None:
-                hits.append(SearchHit(chunk=chunk, score=1.0, channel="structured",
-                                      reasons=[f"证书精确命中 {cert_no}"]))
+            _add(self._fetch_cert(str(cert_no), country, request.language.value))
         return product, hits, spec
 
     @staticmethod
@@ -340,11 +351,21 @@ class InquiryAgent(BaseAgent):
             if c.doc_type == "术语表":
                 pass
             if c.doc_type == "产品条目":
-                # 只引用**本次选中的**那个产品，别把其它型号也写进对外内容
+                # 只引用**本次选中的那个产品**，别把其它型号也写进对外内容
                 if product is not None and c.chunk_id != product.chunk_id:
                     continue
-                cites.append(Citation(citation_id=c.identifiers.get("sku", c.doc_id), type="产品条目",
-                                      note=f"{c.title} · 库版本 {c.kb_version}"))
+                # 引用标识必须能**唯一定位到一个块**（R14-03）：
+                # 一个 sku 现在对应 5 个块（4 语 + 1 规格），只写 sku 指不到具体哪一块。
+                cites.append(Citation(citation_id=c.identifiers.get("doc_ref", c.doc_id), type="产品条目",
+                                      note=f"{c.title} · 语言 {c.lang} · 库版本 {c.kb_version}"))
+            elif c.doc_type == "产品规格":
+                # 规格记录 = 数值的唯一真源（FR-KB-07：产品 SKU 与规格版本）。
+                extra = c.extra or {}
+                cites.append(Citation(citation_id=c.identifiers.get("attr_id", c.doc_id), type="产品规格",
+                                      note=(f"规格版本 {c.identifiers.get('attr_id', c.doc_id)}"
+                                            f" · 参考价 {extra.get('price_low')} {extra.get('currency', '')}"
+                                            f" · 交期 {extra.get('lead_time_days', '')} 天"
+                                            f" · 库版本 {c.kb_version}")))
             elif c.doc_type == "证书":
                 cites.append(Citation(citation_id=c.identifiers.get("cert_no", c.doc_id), type="证书",
                                       note=f"有效期至 {c.valid_until.date() if c.valid_until else '—'}"
@@ -356,7 +377,15 @@ class InquiryAgent(BaseAgent):
             elif c.doc_type == "术语表":
                 cites.append(Citation(citation_id=c.identifiers.get("term_id", c.doc_id), type="术语表",
                                       note=f"{c.title} · 库版本 {c.kb_version}"))
-        return cites
+        # 引用不得重复（R14-01）：同一张证书可能既被词法命中、又被按证书号回查命中
+        seen_ids = set()
+        uniq = []
+        for cit in cites:
+            if cit.citation_id in seen_ids:
+                continue
+            seen_ids.add(cit.citation_id)
+            uniq.append(cit)
+        return uniq
 
     @staticmethod
     def _clarify_body(lang: Language, intents: List[Intent]) -> str:

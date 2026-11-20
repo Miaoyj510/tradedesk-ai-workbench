@@ -62,8 +62,9 @@ def main() -> int:
     else:
         store = SqliteStateStore(cfg.db_path)
     try:
-        if hasattr(store, "reset") and not args.dsn:
-            store.reset()
+        # 不碰库的全量清理（R15-03）：它会清 threads/customers/audit_log/gate_tokens，
+        # 建向量索引与审计链无关，不能被索引脚本手法抹掉。
+        # load_kb 是幂等重灌种子，且不删向量（R15-02）。
         load_kb(store, cfg.kb_version)
         emb = RemoteEmbedder(base_url=cfg.embedder_base_url, api_key=cfg.llm_api_key,
                               model=cfg.embedding_model, dim=cfg.embedding_dim,
