@@ -47,8 +47,17 @@ class Config:
     llm_base_url: str = ""
     llm_timeout_s: int = 30
     # 检索
-    embedding_model: str = "BGE-M3"
+    # 体前实际使用的嵌入模型。PRD 原定 BGE-M3（本地部署），但本机无可用 GPU
+    # （Iris Xe 共享显存 128MB）、16GB 内存，且 Docker Hub 拉不到模型镜像 —— 因此 S4 走**云端嵌入 API**
+    # （PRD 13.4.5 选型轴③允许替换嵌入实现，接口不变）。评测报告里必须写清模型口径。
+    embedding_model: str = "embo-01"
+    embedding_dim: int = 1024
     reranker_model: str = "bge-reranker-v2-m3"
+    embedder_provider: str = "minimax"
+    embedder_base_url: str = "https://api.minimaxi.com"
+    embedder_batch_size: int = 16
+    # 默认关闭：启动时嵌入会调云端 API（计费），测试与本地运行必须开启才会发起请求。
+    embedder_enabled: bool = False
     kb_version: str = KB_VERSION
     list_version: str = "sanctions-2026.11-a"
     # 业务阈值
@@ -83,8 +92,13 @@ class Config:
             llm_api_key=get("MINIMAX_API_KEY", ""),
             llm_base_url=get("MINIMAX_BASE_URL", ""),
             llm_timeout_s=int(get("TRADEDESK_LLM_TIMEOUT_S", "30")),
-            embedding_model=get("TRADEDESK_EMBEDDING_MODEL", "BGE-M3"),
+            embedding_model=get("TRADEDESK_EMBEDDING_MODEL", "embo-01"),
+            embedding_dim=int(get("TRADEDESK_EMBEDDING_DIM", "1024")),
             reranker_model=get("TRADEDESK_RERANKER_MODEL", "bge-reranker-v2-m3"),
+            embedder_provider=get("TRADEDESK_EMBEDDER_PROVIDER", "minimax"),
+            embedder_base_url=get("MINIMAX_BASE_URL", "") or "https://api.minimaxi.com",
+            embedder_batch_size=int(get("TRADEDESK_EMBEDDER_BATCH_SIZE", "16")),
+            embedder_enabled=get("TRADEDESK_EMBEDDER_ENABLED", "0") in ("1", "true", "True", "yes"),
             kb_version=get("TRADEDESK_KB_VERSION", KB_VERSION),
             list_version=get("TRADEDESK_LIST_VERSION", "sanctions-2026.11-a"),
             sla_first_response_s=int(get("TRADEDESK_SLA_FIRST_RESPONSE_S", "300")),
