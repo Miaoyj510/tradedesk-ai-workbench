@@ -16,7 +16,7 @@ from ..agents.sentinel import SentinelAgent
 from ..config import Config, get_settings
 from ..runtime.gates import GateTokenService
 from ..retrieval.store_retriever import StoreRetriever
-from ..retrieval.indexer import index_kb, load_index
+from ..retrieval.indexer import load_index
 from ..runtime.supervisor import Supervisor
 from ..store.base import StateStore
 from ..store.sqlite_store import SqliteStateStore
@@ -67,13 +67,18 @@ class AppContext:
         # 检索层降级为词法 + 结构化双通道，且不得对外宣称有语义召回能力。
         self.embedder = self._build_embedder()
         self.vector_index = None
-        if self.embedder is not None:
-            try:
-                stats = index_kb(self.store, self.embedder, self.kb_version)
-                self.vector_index = load_index(self.store, self.kb_version)
-                print(f"[deps] 向量索引就绪：{stats} 模型 {self.embedder.name}")
-            except Exception as exc:
-                print(f"[deps] 向量索引失败（检索降级为词法+结构化双通道）：{exc}")
+        # 启动时**只读**现成的向量索引，不自动建。
+        # 建索引是**显式动作**（scripts/index_kb.py 或 dev.ps1 index）：
+        #   - 为什么不在启动时建？每个进程启动都去调云端 API（计费），
+        #     而且审核脚本每次都新建一个空库 → 每次都要重新嵌入全部块；
+        #   - 生产形态下索引应该是发布流水线的一步（PRD 13.4.8），而不是每次启动。
+        try:
+            self.vector_index = load_index(self.store, self.kb_version)
+            if len(self.vector_index):
+                print(f"[deps] 向量索引已加载：{len(self.vector_index)} 条"
+                      f"（需重建时跑 dev.ps1 index）")
+        except Exception as exc:
+            print(f"[deps] 向量索引加载失败（检索降级为词法+结构化双通道）：{exc}")
         self.registry = registry or build_registry(retriever=self.retriever)
         self.tokens = GateTokenService(store, ttl_seconds=self.config.gate_token_ttl_s)
         self.supervisor = Supervisor(

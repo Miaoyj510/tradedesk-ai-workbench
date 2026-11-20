@@ -75,13 +75,16 @@ class RemoteEmbedder:
     - 地址：`{base_url}/v1/embeddings`（国内 `api.minimaxi.com`，国际 `api.minimax.chat`）
     - 鉴权：`Authorization: Bearer <key>`（**失败时 HTTP 仍是 200**，真正的错误在 `base_resp.status_code` 里）
     - 请求体：`{"model": "embo-01", "texts": [...], "type": "db"|"query"}`
+    - 响应：**实测为** `{"base_resp": {...}, "total_tokens": n, "vectors": [[...], ...]}`
+      （**不是** OpenAI 那套 `data[].embedding`）—— 解析器两种形态都支持，以免接口变动时静默失败。
+    - 维度：`embo-01` 实际输出 **1536 维**
     """
 
     name = "remote"
     semantic = True
 
     def __init__(self, base_url: str, api_key: str, model: str = "embo-01",
-                 dim: int = 1024, timeout_s: int = 30, retries: int = 2,
+                 dim: int = 1536, timeout_s: int = 30, retries: int = 2,
                  batch_size: int = 16, provider: str = "minimax",
                  group_id: str = "", transport: Optional[Transport] = None) -> None:
         if not base_url:

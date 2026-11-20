@@ -51,7 +51,9 @@ class Config:
     # （Iris Xe 共享显存 128MB）、16GB 内存，且 Docker Hub 拉不到模型镜像 —— 因此 S4 走**云端嵌入 API**
     # （PRD 13.4.5 选型轴③允许替换嵌入实现，接口不变）。评测报告里必须写清模型口径。
     embedding_model: str = "embo-01"
-    embedding_dim: int = 1024
+    # embo-01 的真实输出维度是 **1536**（实测云端接口得到，不是文档里的 1024）。
+    # 维度错会在嵌入客户端直接报错，也会让 pgvector 列拒绝写入 —— 两道关都能拦下来。
+    embedding_dim: int = 1536
     reranker_model: str = "bge-reranker-v2-m3"
     embedder_provider: str = "minimax"
     embedder_base_url: str = "https://api.minimaxi.com"
@@ -93,7 +95,7 @@ class Config:
             llm_base_url=get("MINIMAX_BASE_URL", ""),
             llm_timeout_s=int(get("TRADEDESK_LLM_TIMEOUT_S", "30")),
             embedding_model=get("TRADEDESK_EMBEDDING_MODEL", "embo-01"),
-            embedding_dim=int(get("TRADEDESK_EMBEDDING_DIM", "1024")),
+            embedding_dim=int(get("TRADEDESK_EMBEDDING_DIM", "1536")),
             reranker_model=get("TRADEDESK_RERANKER_MODEL", "bge-reranker-v2-m3"),
             embedder_provider=get("TRADEDESK_EMBEDDER_PROVIDER", "minimax"),
             embedder_base_url=get("MINIMAX_BASE_URL", "") or "https://api.minimaxi.com",
