@@ -187,8 +187,9 @@ def scenario_7_citations(store) -> None:
     cites = d["draft"]["citations"]
     check("草稿带引用", len(cites) >= 2, f"{len(cites)} 条")
     check("每条引用都有标识", all(c.get("citation_id") for c in cites))
-    known = {c.identifiers.get("cert_no") or c.identifiers.get("sku") or c.identifiers.get("clause_no")
-              or c.identifiers.get("term_id") or c.doc_id for c in store.list_kb_chunks(KB_VERSION)}
+    # 引用可用的唯一标识（doc_ref / attr_id 等）回指，不只是每块的首个标识
+    _all = store.list_kb_chunks(KB_VERSION)
+    known = {v for c in _all for v in c.identifiers.values()} | {c.doc_id for c in _all}
     unknown = [c["citation_id"] for c in cites if c["citation_id"] not in known]
     check("每条引用都能在知识库里查到（可回指）", not unknown, str(unknown))
     check("引用带库版本留痕", all("库版本" in c.get("note", "") for c in cites),

@@ -99,6 +99,11 @@ def build_demo_chunks(kb_version: str = KB_VERSION) -> List[KBChunk]:
 
     def add(**kw):
         kw.setdefault("kb_version", kb_version)
+        # doc_ref = 块自己的唯一标识（FR-KB-07）。一个 sku 对应多个块（四语 + 规格）时，
+        # 只写 sku 的引用指不到具体哪一块（R14-03）。
+        _ids = dict(kw.get("identifiers") or {})
+        _ids.setdefault("doc_ref", kw.get("doc_id", ""))
+        kw["identifiers"] = _ids
         chunks.append(KBChunk(**kw))
 
     # ---------------- 产品：1 条结构化规格记录 + 4 条语言版本 ----------------

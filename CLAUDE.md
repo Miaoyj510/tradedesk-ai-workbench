@@ -39,7 +39,7 @@ docs/         S2-ACCEPTANCE.md、S2-AUDIT-R9.md、S3-ACCEPTANCE.md、NEXT.md（�
 
 **PRD 冲突以 PRD 为准**；实在判断不了就停下来问，不要擅自选一边。
 
-## 当前状态（2026-11-19）
+## 当前状态（2026-11-20）
 
 S1 收口 → S2 已交卷 → R9 审核（14 个根因）→ R10 全修完
 → S3 检索层交卷（`3e86884`）→ 审核 R11（8 个根因）→ 审核 R12（3 个根因）
@@ -47,21 +47,24 @@ S1 收口 → S2 已交卷 → R9 审核（14 个根因）→ R10 全修完
 
 → **S4-4a 向量层交卷**（嵌入接口 / 向量存储 / 索引 / 余弦检索，见 `docs/S4-ACCEPTANCE.md`）。
 
-`dev.ps1 check` 八步当前全绿：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
-→ S2 独立审核 106/106 → pytest 126 passed → S3 独立审核 78/78 → **S4 向量层 48/48**。
+`dev.ps1 check` 八步：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
+→ S2 独立审核 106/106 → pytest 126 passed → S3 独立审核 → **S4 向量层 48/48**。
 
-下一步是 S4-4b（向量通道接入 RRF 第三通道，需要 MiniMax key）—— 看 `docs/NEXT.md`。
+**审核线（`agent-b`）现状**：R14（S3 引用装配）3 个根因、R15（S4 向量层）7 个根因**都还没修**；
+`dev.ps1 audit3` 红 5 条、`dev.ps1 audit4` 红 12 条。
+下一步是修完这两轮再开 S4-4b（向量通道接入 RRF 第三通道，需要 MiniMax key）—— 看 `docs/NEXT.md`。
 
 ## 常用命令
 
 ```powershell
 $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
-& $dev check              # 交付前自检（八步）：语法 + S1 双后端 + S2/S3 自证 + S2/S3 独立审核 + S4 + pytest
+& $dev check              # 交付前自检（九步）：语法 + S1 双后端 + S2/S3 自证 + S2/S3 独立审核 + S4 + pytest
 & $dev verify             # 只跑 S1 验证
 & $dev test               # 只跑 pytest
 & $dev audit              # S2 独立审核（审核方断言）
-& $dev audit3             # S3 独立审核（已进 check，这里可单独跑）
-& $dev audit3             # S3 独立审核（审核方断言；R11 缺陷修完前为红）
+& $dev audit3             # S3 独立审核（已进 check，这里可单独跑；R14 缺陷修完前为红）
+& $dev audit4             # S4 独立审核（审核方断言；R15 缺陷修完前为红）
+& $dev index              # 建立知识库向量索引（显式动作，会调云端 API、计费）
 & $dev serve              # 起 HTTP 接口（http://127.0.0.1:8080/docs）
 & $dev clean              # 清验证临时文件与缓存
 ```

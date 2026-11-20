@@ -183,6 +183,10 @@ class RemoteEmbedder:
         vecs = self._post([text], "query")
         if not vecs:
             raise EmbeddingError("嵌入 API 没有返回查询向量")
+        # 查询侧与文档侧同口径校验维度（R15-06）：文档侧错会报错，
+        # 查询侧错了只是静默地与所有向量点积为 0（“召不到”）。
+        if len(vecs[0]) != self.dim:
+            raise EmbeddingError(f"嵌入维度与预期不符：预期 {self.dim}，实际 {len(vecs[0])}")
         return _normalize(vecs[0])
 
 
@@ -228,23 +232,26 @@ class HashEmbedder:
 
 
 class NullEmbedder:
-    """占位实现：不产出向量，只把文本按字符 n-gram 稀疏化。
+    """占位实现：固定维度的字符 n-gram 散列。
 
-    它让“稠密通道”在管线里真实存在（可被 RRF 融合），但**不代表语义检索能力**。
+    **不具备语义能力**（`semantic = False`）。R15-05：旧版本词表随批次变动（单条 3 维 / 两条 6 维），
+    且不归一 —— 向量不可比，“余弦相似度”也不成立。
     """
 
     name = "null-embedder"
     semantic = False
+    dim = 256
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         from .lexical import char_ngrams
-        vocab = sorted({g for t in texts for g in char_ngrams(t)})
-        idx = {g: i for i, g in enumerate(vocab)}
-        out = []
+        vec = [0.0] * self.dim
         for t in texts:
-            vec = [0.0] * len(vocab)
             for g in char_ngrams(t):
-                if g in idx:
-                    vec[idx[g]] = 1.0
-            out.append(vec)
-        return out
+                h = hashlib.blake2b(g.encode("utf-8"), digest_size=8).digest()
+                idx = int.from_bytes(h[:4], "big") % self.dim
+                sign = 1.0 if h[4] % 2 == 0 else -1.0
+                vec[idx] += sign
+        return [_normalize(vec) for _ in texts]
+
+    def embed_query(self, text: str) -> List[float]:
+        return self.embed([text])[0]

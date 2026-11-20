@@ -448,9 +448,9 @@ class PostgresStateStore:
         return None
 
     def clear_kb(self) -> None:
+        # 重灌块不删向量（R15-02）：向量是派生数据，块没变就不该重嵌
         with self.conn.cursor() as cur:
             cur.execute("DELETE FROM kb_chunks")
-            cur.execute("DELETE FROM kb_embeddings")
 
     # ---------- 向量（S4） ----------
     def _init_embedding_table(self, cur) -> None:
@@ -481,6 +481,13 @@ class PostgresStateStore:
                           f"（向量需重新索引）")
                     cur.execute("ALTER TABLE kb_embeddings DROP COLUMN embedding")
                     cur.execute(f"ALTER TABLE kb_embeddings ADD COLUMN embedding vector({self.vector_dim})")
+                    # 旧行的向量已经丢了 → 清掉行，不留“有行但向量为空”的残骸（R15-04）
+                    cur.execute("DELETE FROM kb_embeddings")
+            # 老库补列：content_fp 是失效键的一部分（R15-01）
+            cur.execute("SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name='kb_embeddings' AND column_name='content_fp'")
+            if cur.fetchone() is None:
+                cur.execute("ALTER TABLE kb_embeddings ADD COLUMN content_fp TEXT NOT NULL DEFAULT ''")
             return
         if self.pgvector_available and self.vector_dim > 0:
             cur.execute(
@@ -490,6 +497,7 @@ class PostgresStateStore:
                 f"  model      TEXT NOT NULL DEFAULT '',"
                 f"  dim        INTEGER NOT NULL DEFAULT 0,"
                 f"  embedding  vector({self.vector_dim}),"
+                f"  content_fp TEXT NOT NULL DEFAULT '',"
                 f"  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
             self.embedding_column = "vector"
         else:
@@ -500,29 +508,32 @@ class PostgresStateStore:
                 "  model      TEXT NOT NULL DEFAULT '',"
                 "  dim        INTEGER NOT NULL DEFAULT 0,"
                 "  embedding  JSONB NOT NULL DEFAULT '[]'::jsonb,"
+                "  content_fp TEXT NOT NULL DEFAULT '',"
                 "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
             self.embedding_column = "jsonb"
 
-    def upsert_kb_embedding(self, chunk_id, kb_version, model, vector) -> None:
+    def upsert_kb_embedding(self, chunk_id, kb_version, model, vector, content_fp="") -> None:
         vec = [float(x) for x in vector]
         with self.conn.cursor() as cur:
             if self.embedding_column == "vector":
                 cur.execute(
-                    "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, embedding, updated_at) "
-                    "VALUES(%s,%s,%s,%s, CAST(%s AS vector), now()) "
+                    "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, embedding, content_fp, updated_at) "
+                    "VALUES(%s,%s,%s,%s, CAST(%s AS vector), %s, now()) "
                     "ON CONFLICT(chunk_id) DO UPDATE SET kb_version=excluded.kb_version, "
-                    "model=excluded.model, dim=excluded.dim, embedding=excluded.embedding, updated_at=now()",
+                    "model=excluded.model, dim=excluded.dim, embedding=excluded.embedding, "
+                    "content_fp=excluded.content_fp, updated_at=now()",
                     (chunk_id, kb_version, model, len(vec),
-                     "[" + ",".join(f"{x:.6f}" for x in vec) + "]"),
+                     "[" + ",".join(f"{x:.6f}" for x in vec) + "]", content_fp or ""),
                 )
             else:
                 from psycopg.types.json import Json
                 cur.execute(
-                    "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, embedding, updated_at) "
-                    "VALUES(%s,%s,%s,%s,%s, now()) "
+                    "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, embedding, content_fp, updated_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s, now()) "
                     "ON CONFLICT(chunk_id) DO UPDATE SET kb_version=excluded.kb_version, "
-                    "model=excluded.model, dim=excluded.dim, embedding=excluded.embedding, updated_at=now()",
-                    (chunk_id, kb_version, model, len(vec), Json(vec)),
+                    "model=excluded.model, dim=excluded.dim, embedding=excluded.embedding, "
+                    "content_fp=excluded.content_fp, updated_at=now()",
+                    (chunk_id, kb_version, model, len(vec), Json(vec), content_fp or ""),
                 )
 
     def list_kb_embeddings(self, kb_version=None):
@@ -544,8 +555,21 @@ class PostgresStateStore:
                     vec = list(raw)
                 else:
                     vec = []
+                if not vec:
+                    # 空向量（换维度后的残骸）不算一条有效索引（R15-04）
+                    continue
                 out.append((chunk_id, model, [float(x) for x in vec]))
         return out
+
+    def list_kb_embedding_meta(self, kb_version=None):
+        sql, params = "SELECT chunk_id, model, content_fp FROM kb_embeddings", []
+        if kb_version:
+            sql += " WHERE kb_version=%s"
+            params.append(kb_version)
+        sql += " ORDER BY chunk_id"
+        with self.conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [(cid, model, fp or "") for cid, model, fp in cur.fetchall()]
 
     def clear_kb_embeddings(self, kb_version=None) -> None:
         with self.conn.cursor() as cur:

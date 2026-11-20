@@ -390,9 +390,11 @@ def audit_5_structured() -> None:
           "USD" not in body and not cites,
           f"status={d.get('status')} 正文含价格={'USD' in body} 引用={cites}")
     clause("5.4")
-    known = {c2.identifiers.get("cert_no") or c2.identifiers.get("sku")
-             or c2.identifiers.get("clause_no") or c2.identifiers.get("term_id") or c2.doc_id
-             for c2 in store.list_kb_chunks(KB_VERSION)}
+    # known：**所有标识值 + doc_id**。旧写法只收每个块的首个标识（如产品块只有 "X-200"），
+    # 而 R14-03 要求引用标识能唯一定位到一个块（一个 sku 对应 5 个块），
+    # 所以引用用 doc_ref / attr_id 这样的唯一标识 —— 两条断言在旧 known 集合下互相冲突。
+    _chunks_all = store.list_kb_chunks(KB_VERSION)
+    known = {v for c2 in _chunks_all for v in c2.identifiers.values()} | {c2.doc_id for c2 in _chunks_all}
     raw_cites = d["draft"]["citations"] if d.get("draft") else []
     orphan = [x["citation_id"] for x in raw_cites if x["citation_id"] not in known]
     check("走写死兜底路径时产生的引用仍要可回指（FR-KB-07）", not orphan,
@@ -418,9 +420,11 @@ def audit_6_citations() -> None:
                                  "language": "en", "company": "Cite Co"}).json()
     cites = d["draft"]["citations"] if d.get("draft") else []
     body = d["draft"]["body"] if d.get("draft") else ""
-    known = {c2.identifiers.get("cert_no") or c2.identifiers.get("sku")
-             or c2.identifiers.get("clause_no") or c2.identifiers.get("term_id") or c2.doc_id
-             for c2 in store.list_kb_chunks(KB_VERSION)}
+    # known：**所有标识值 + doc_id**。旧写法只收每个块的首个标识（如产品块只有 "X-200"），
+    # 而 R14-03 要求引用标识能唯一定位到一个块（一个 sku 对应 5 个块），
+    # 所以引用用 doc_ref / attr_id 这样的唯一标识 —— 两条断言在旧 known 集合下互相冲突。
+    _chunks_all = store.list_kb_chunks(KB_VERSION)
+    known = {v for c2 in _chunks_all for v in c2.identifiers.values()} | {c2.doc_id for c2 in _chunks_all}
     unknown = [x["citation_id"] for x in cites if x["citation_id"] not in known]
     check("每条引用都有标识且能回指", cites and not unknown, f"unknown={unknown}")
     clause("6.2")
@@ -693,11 +697,123 @@ def audit_11_r12() -> None:
 
 
 # --------------------------------------------------------------------------
+# §12 R14 复核（引用去重 / 数值可回指 / 引用可唯一定位）
+#
+# R13 把知识库改成"一个型号 = 1 条结构化规格记录 + 4 条语言版本"之后，
+# 三个新的口径问题浮出来：
+#   · 引用列表里同一张证书出现两次（检索命中 + 按证书号回查，两条命中各生成一条引用）
+#   · 报价里的价格/交期/MOQ 来自"产品规格"块，但那块**不在引用列表里** ——
+#     数值结论没有可回指的来源（FR-KB-07「产品 SKU 与规格版本」）
+#   · 一个 sku 现在对应 5 个块（4 语 + 1 规格），引用只写 sku → 定位不到具体块
+# --------------------------------------------------------------------------
+def audit_12_r14() -> None:
+    section("§12 R14 复核：引用去重与数值可回指（PRD 9.3 引用装配 / FR-KB-07）")
+    store = new_store()
+    c = new_client(store)
+    chunks = store.list_kb_chunks(KB_VERSION)
+    # 标识值 → 块集合（同一标识对应多个块时，引用就定位不到具体块）
+    id_to_chunks = {}
+    for ch in chunks:
+        for _k, v in ch.identifiers.items():
+            id_to_chunks.setdefault(str(v), set()).add(ch.chunk_id)
+    chunk_by_id = {ch.chunk_id: ch for ch in chunks}
+
+    def resolve(cid: str):
+        """引用标识 → 具体块；定位不到（对应多个块）返回 None。"""
+        ids = id_to_chunks.get(cid, set())
+        return chunk_by_id[next(iter(ids))] if len(ids) == 1 else None
+
+    def draft_of(buyer: str, country: str, message: str, lang: str = "en"):
+        r = c.post("/inbound", json={"buyer_id": buyer, "country": country,
+                                     "message": message, "language": lang,
+                                     "company": buyer + " Co"}).json()
+        return (r.get("draft") or {}), r
+
+    # ---- R14-01：引用列表不得有重复（清单 1.11 命中不重复） ----
+    clause("R14-01")
+    for buyer, country, msg in (
+        ("BY-R14-01A", "BR", "Quote 5000 pcs of X-200, do you have CE certificate?"),
+        ("BY-R14-01B", "DE", "Quote 500 pcs of M-77, do you have certificates?"),
+        ("BY-R14-01C", "BR", "Quote 500 pcs of X-300, what certifications do we need?"),
+    ):
+        d, _ = draft_of(buyer, country, msg)
+        ids = [x["citation_id"] for x in d.get("citations") or []]
+        dup = sorted({i for i in ids if ids.count(i) > 1})
+        check("引用列表不得出现重复的引用（命中不重复 / 清单 1.11）", not dup,
+              f"重复={dup} 引用={ids}")
+
+    # ---- R14-02：正文里的数值必须可回指（FR-KB-07「产品 SKU 与规格版本」） ----
+    clause("R14-02")
+    d, _ = draft_of("BY-R14-02", "DE", "Quote 5000 pcs of X-200 FOB Shenzhen")
+    body = d.get("body", "")
+    cites = d.get("citations") or []
+    cite_ids = [x["citation_id"] for x in cites]
+    m = re.search(r"USD\s*([\d.]+)[–-]([\d.]+)", body)
+    price = float(m.group(1)) if m else None
+    # 价格所在的块 = 产品规格记录；它必须被引用，且引用要能指到它
+    spec_chunk = next((ch for ch in chunks
+                       if ch.doc_type == "产品规格"
+                       and ch.identifiers.get("sku") == "X-200"), None)
+    spec_unique = set()
+    if spec_chunk is not None:
+        spec_unique = {str(spec_chunk.identifiers.get("attr_id", "")),
+                       str(spec_chunk.doc_id)}
+    check("引用列表必须有一条指向规格块的引用（FR-KB-07：产品 SKU 与规格版本）",
+          bool(spec_unique & set(cite_ids)),
+          f"正文价={price} 规格块的唯一标识={sorted(spec_unique)} 引用={cite_ids}")
+    # 被引用块里必须真的带着这个价格（数值真源不能只在 extra 里、却没人引）
+    price_found = False
+    unresolved = []
+    for cid in cite_ids:
+        blk = resolve(cid)
+        if blk is None:
+            unresolved.append(cid)
+            continue
+        if price is not None and str(price) in json.dumps(blk.extra, ensure_ascii=False):
+            price_found = True
+    check("正文里的数值必须能在**被引用块**里找到（数值结论可回指）", price_found,
+          f"正文价={price} 引用={cite_ids} 定位不到具体块的引用={unresolved}")
+
+    # ---- R14-03：每条引用必须能唯一定位到一个块 ----
+    clause("R14-03")
+    for buyer, country, msg in (
+        ("BY-R14-03A", "DE", "Quote 5000 pcs of X-200 FOB Shenzhen"),
+        ("BY-R14-03B", "DE", "Quote 500 pcs of M-77 lifting clamp"),
+    ):
+        d, _ = draft_of(buyer, country, msg)
+        ambiguous = []
+        for x in d.get("citations") or []:
+            cid = x["citation_id"]
+            hit = id_to_chunks.get(cid, set())
+            if len(hit) > 1:
+                ambiguous.append(f"{cid}->{len(hit)} 块")
+        check("每条引用必须能唯一定位到一个知识块（doc_id + 语言标签 + 规格版本）",
+              not ambiguous,
+              f"定位不到具体块的引用={ambiguous} 引用={[x['citation_id'] for x in d.get('citations') or []]}")
+
+    # ---- R14-04（记账）：词法通道跨型号噪声 + 规格回查的 top_k 脆弱 ----
+    clause("R14-04")
+    r = StoreRetriever(store, KB_VERSION)
+    hits = r.search(SearchQuery(text="X-200", lang="en", top_k=8))
+    ids8 = [h.chunk.chunk_id for h in hits]
+    others = [i for i in ids8 if "X-300" in i]
+    note("词法通道会把别的型号的块带进前几名（数字 bigram 撞车，S4 加向量后要复测）",
+         f"查 X-200 的命中={ids8} 其中别的型号={others}")
+    spec_rank = None
+    for i, h in enumerate(hits, 1):
+        if h.chunk.doc_type == "产品规格" and h.chunk.identifiers.get("sku") == "X-200":
+            spec_rank = i
+            break
+    note("规格回查靠 top_k=5 取块，与『同型号块数』耦合（加一块就可能取不到规格）",
+         f"规格块在 top8 里排第 {spec_rank}；当前实现用 top_k=5 回查")
+
+
+# --------------------------------------------------------------------------
 def run_all() -> None:
     for fn in (audit_1_assets, audit_2_expiry, audit_3_country, audit_4_crosslingual,
                audit_5_structured, audit_6_citations, audit_7_data_from_kb,
                audit_8_chunking, audit_9_api_and_backends, audit_10_backends,
-               audit_11_r12):
+               audit_11_r12, audit_12_r14):
         fn()
         close_stores()
 

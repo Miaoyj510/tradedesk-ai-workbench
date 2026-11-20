@@ -37,7 +37,8 @@ class SearchHit(BaseModel):
     @property
     def citation_id(self) -> str:
         ids = self.chunk.identifiers
-        for key in ("cert_no", "clause_no", "sku", "entry_id", "term_id", "doc_no"):
+        # doc_ref 优先于 sku：一个 sku 对应多个块时，只写 sku 指不到块（R14-03）
+        for key in ("cert_no", "clause_no", "entry_id", "term_id", "doc_ref", "sku", "doc_no"):
             if ids.get(key):
                 return str(ids[key])
         return self.chunk.doc_id
@@ -62,3 +63,4 @@ class Embedder(Protocol):
     semantic: bool
 
     def embed(self, texts: List[str]) -> List[List[float]]: ...
+    def embed_query(self, text: str) -> List[float]: ...

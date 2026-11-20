@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Dict, List, Optional
 
 from ..domain.models import KBChunk
@@ -36,6 +37,23 @@ def embedder_tag(embedder: Embedder) -> str:
     return f"{embedder.name}/{model}/{dim}".strip("/")
 
 
+def chunk_fingerprint(chunk: KBChunk) -> str:
+    """块内容指纹（失效键的一部分）。
+
+    R15-01：失效键只有 name/model/dim 时，块正文改了但库版本号没升 → 向量不重算 →
+    向量通道返回旧内容。这正是 S3 那个 R11-07（“改库后同进程不生效”）在向量层的翻版，
+    所以这里直接照抄内容指纹的做法。
+    """
+    import hashlib
+    h = hashlib.blake2b(digest_size=16)
+    payload = json.dumps({
+        "title": chunk.title, "text": chunk.text, "lang": chunk.lang,
+        "ids": chunk.identifiers, "extra": chunk.extra,
+    }, sort_keys=True, ensure_ascii=False, default=str)
+    h.update(payload.encode("utf-8"))
+    return h.hexdigest()
+
+
 def index_kb(store, embedder: Embedder, kb_version: str,
              chunks: Optional[List[KBChunk]] = None,
              force: bool = False) -> Dict[str, int]:
@@ -43,8 +61,13 @@ def index_kb(store, embedder: Embedder, kb_version: str,
     blocks = chunks if chunks is not None else store.list_kb_chunks(kb_version)
     tag = embedder_tag(embedder)
     if not force:
-        existing = {cid: model for cid, model, _ in store.list_kb_embeddings(kb_version)}
-        todo = [c for c in blocks if existing.get(c.chunk_id) != tag]
+        # 失效键 = 模型版本 + **块内容指纹**（R15-01）：块正文改了（版本号没升）也必须重算向量
+        existing = {cid: (model, fp) for cid, model, fp in store.list_kb_embedding_meta(kb_version)}
+        todo = []
+        for c in blocks:
+            model, fp = existing.get(c.chunk_id, ("", ""))
+            if model != tag or fp != chunk_fingerprint(c):
+                todo.append(c)
     else:
         todo = list(blocks)
     if not todo:
@@ -54,7 +77,7 @@ def index_kb(store, embedder: Embedder, kb_version: str,
     if len(vectors) != len(todo):
         raise RuntimeError(f"嵌入数量不匹配：块 {len(todo)} 个，向量 {len(vectors)} 条")
     for c, v in zip(todo, vectors):
-        store.upsert_kb_embedding(c.chunk_id, kb_version, tag, v)
+        store.upsert_kb_embedding(c.chunk_id, kb_version, tag, v, chunk_fingerprint(c))
     return {"indexed": len(todo), "skipped": len(blocks) - len(todo)}
 
 
