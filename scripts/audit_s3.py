@@ -605,10 +605,99 @@ def audit_10_backends() -> None:
 
 
 # --------------------------------------------------------------------------
+# §11 R12 复核（正文里的证书怎么选 / 国别未知 / 属性过滤的信号）
+#
+# 背景：R11 的修复把"买家国别过滤"套到了结构化通道的**全部**块上（含证书），
+# 而正文里的证书行取的是"命中列表里的第一张证书"，**不按 covers 过滤** ——
+# 于是别的型号的证书会被说成覆盖本型号（R12-01），买家自己的产品证书被国别
+# 过滤掉之后又由体系证书顶替（R12-02）。国别未知时草稿仍按正常件外发（R12-03）。
+# --------------------------------------------------------------------------
+def audit_11_r12() -> None:
+    section("§11 R12 复核：正文证书选取口径与国别未知（PRD 9.3 / FR-KB-06）")
+    store = new_store()
+    c = new_client(store)
+    certs = {x.identifiers.get("cert_no"): x for x in store.list_kb_chunks(KB_VERSION)
+             if x.identifiers.get("cert_no")}
+    prods = {x.identifiers.get("sku"): x for x in store.list_kb_chunks(KB_VERSION)
+             if x.identifiers.get("sku")}
+
+    def draft_of(buyer: str, country: str, message: str, lang: str = "en"):
+        r = c.post("/inbound", json={"buyer_id": buyer, "country": country,
+                                     "message": message, "language": lang,
+                                     "company": buyer + " Co"}).json()
+        return (r.get("draft") or {}), r
+
+    def certs_in_body(body: str):
+        # 各语种正文里的证书号写法不同（certificate/certificado/الشهادة），
+        # 这里直接按证书号形态捞，不依赖语种
+        return re.findall(r"((?:CERT|TC)-[A-Z0-9-]+)", body or "")
+
+    # ---- R12-01：正文提到的证书必须覆盖草稿里的型号，且必须在引用列表里 ----
+    clause("R12-01")
+    for lang, msg in (
+        ("en", "Quote 500 pcs of M-77 lifting clamp, do you have CE certificate?"),
+        ("es", "¿Cotización de 500 piezas de M-77, tienen certificado CE?"),
+        ("ar", "500 قطعة من M-77، هل لديكم شهادة CE؟"),
+    ):
+        d, r = draft_of(f"BY-R12-01-{lang}", "DE", msg, lang)
+        body = d.get("body", "")
+        cites = [x["citation_id"] for x in d.get("citations") or []]
+        named = certs_in_body(body)
+        wrong = []
+        for cert_no in named:
+            ch = certs.get(cert_no)
+            covers = [str(x).upper() for x in ((ch.extra.get("covers") if ch else None) or [])]
+            if covers and "M-77" not in covers:
+                wrong.append(f"{cert_no}(covers={covers})")
+        check(f"[{lang}] 正文提到的证书必须覆盖该型号（covers）", not wrong,
+              f"正文证书={named} 不覆盖 M-77 的={wrong}")
+        missing = [x for x in named if x not in cites]
+        check(f"[{lang}] 正文提到的证书必须在引用列表里（正文与引用不打架）", not missing,
+              f"正文证书={named} 引用={cites} 缺={missing}")
+
+    # ---- R12-02：证书不得按买家国别过滤（FR-KB-05 只管法规与名单条目） ----
+    clause("R12-02")
+    d2, _ = draft_of("BY-R12-02", "BR",
+                     "Quote 5000 pcs of X-200 FOB Shenzhen, do you have CE certification?")
+    body2 = d2.get("body", "")
+    named2 = certs_in_body(body2)
+    want = [x for x in (prods["X-200"].extra.get("certificates") or [])]
+    missing2 = [x for x in want if x not in named2]
+    check("产品的结构化证书不得因买家国别被滤掉（FR-KB-05 的国别过滤对象是法规与名单条目）",
+          not missing2, f"X-200 的证书={want} 正文提到={named2} 缺={missing2}")
+    extra2 = [x for x in named2 if x not in want]
+    check("正文提到的证书必须来自该型号的结构化证书列表", not extra2,
+          f"正文提到={named2} 该型号证书={want} 多出={extra2}")
+
+    # ---- R12-03：国别未知 → 不引用别国法规，且必须转人工 ----
+    clause("R12-03")
+    d3, r3 = draft_of("BY-R12-03", "",
+                      "Quote 5000 pcs of X-200 FOB Shenzhen, what certifications do we need?")
+    cited3 = [x["citation_id"] for x in d3.get("citations") or []]
+    country_regs = [x for x in cited3 if x.startswith("REG-")]
+    check("国别未知 → 引用里不得有任何国别专属法规（FR-KB-05 / FR-GRC-05）",
+          not country_regs, f"引用={cited3}")
+    check("国别未知 → 草稿必须转人工确认（先问目的港所在国，GATE-06）",
+          bool(d3.get("needs_human_confirmation")),
+          f"needs_human_confirmation={d3.get('needs_human_confirmation')} status={r3.get('status')}")
+
+    # ---- R12-04（记账）：属性过滤丢弃的块必须可观测 ----
+    clause("R12-04")
+    from tradedesk.retrieval.pipeline import RetrievalPipeline
+    pipe = RetrievalPipeline(store.list_kb_chunks(KB_VERSION), KB_VERSION)
+    kept, dropped = pipe.filter(SearchQuery(text="REG-AE-099", lang="en",
+                                             buyer_country="BR", top_k=5))
+    note("属性过滤丢弃的块必须能被调用方观测（否则 agent 分不清『没匹配』与『被过滤』）",
+         f"kept={len(kept)} dropped={len(dropped)}"
+         f"（dropped 只统计已过期块；国别/HS 过滤掉的块没有任何信号）")
+
+
+# --------------------------------------------------------------------------
 def run_all() -> None:
     for fn in (audit_1_assets, audit_2_expiry, audit_3_country, audit_4_crosslingual,
                audit_5_structured, audit_6_citations, audit_7_data_from_kb,
-               audit_8_chunking, audit_9_api_and_backends, audit_10_backends):
+               audit_8_chunking, audit_9_api_and_backends, audit_10_backends,
+               audit_11_r12):
         fn()
         close_stores()
 
