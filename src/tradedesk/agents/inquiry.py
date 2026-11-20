@@ -17,8 +17,7 @@ import re
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
-from ..data.seed import demo_certificates, demo_products
-from ..retrieval.base import SearchQuery
+from ..retrieval.base import SearchHit, SearchQuery
 from ..domain.agentspec import AgentSpec, AgentStatus, ToolMode, ToolSpec
 from ..domain.enums import Intent, Language
 from ..domain.models import Citation, Draft
@@ -79,6 +78,13 @@ CERT_LINE = {
     Language.ZH: "该型号由证书 {cert_no}（{cert_type}）覆盖，有效期至 {valid_until}。",
 }
 
+CERT_LINE_SYSTEM = {
+    Language.EN: "Our factory quality management system is certified under {cert_no} ({cert_type}), valid until {valid_until}.",
+    Language.ES: "Nuestro sistema de gestión de calidad de fábrica está certificado según {cert_no} ({cert_type}), válido hasta {valid_until}.",
+    Language.AR: "نظام إدارة الجودة في مصنعنا معتمد بموجب {cert_no} ({cert_type})، صالح حتى {valid_until}.",
+    Language.ZH: "工厂质量管理体系通过 {cert_no}（{cert_type}）认证，有效期至 {valid_until}。",
+}
+
 ASK_LINE = {
     Language.EN: "the destination port, quantity and the Incoterm you prefer",
     Language.ES: "el puerto de destino, la cantidad y el Incoterm que prefiere",
@@ -133,80 +139,110 @@ class InquiryAgent(BaseAgent):
     def __init__(self, retriever=None) -> None:
         super().__init__(INQUIRY_SPEC)
         self.retriever = retriever
-        self.products = demo_products()
-        self.certificates = demo_certificates()
 
     # ---- 证据装配 ----
-    def _match_products(self, message: str) -> List[dict]:
-        found = []
-        for sku in SKU_PATTERN.findall(message or ""):
-            for p in self.products:
-                if p["sku"].upper() == sku.upper():
-                    found.append(p)
-        if not found:
-            # 没写型号时按关键词猜一次（只猜唯一命中的），猜不到就留空
-            text = (message or "").lower()
-            hits = [p for p in self.products
-                    if any(k in text for k in (p["name"]["en"].lower().split()[-1],
-                                              p["name"]["es"].lower().split()[-1]))]
-            found = hits[:1]
-        return found
-
-    def _citations_for(self, products: List[dict]) -> List[Citation]:
-        cites: List[Citation] = []
-        for p in products:
-            cites.append(Citation(citation_id=f"SKU {p['sku']} v1", type="产品条目",
-                                  note=f"{p['material']} · MOQ {p['moq']} · 交期 {p['lead_time_days']} 天"))
-            for cert_no in p["certificates"]:
-                c = next((x for x in self.certificates if x["cert_no"] == cert_no), None)
-                if c:
-                    cites.append(Citation(citation_id=c["cert_no"], type="证书",
-                                          note=f"{c['type']} · 有效期至 {c['valid_until']} · {c['issuer']}"))
-        return cites
+    # R11-05 / R11-06：**不再有"写死常量"这条兜底路径**。
+    # 知识库是价格、规格、证书的唯一真源：检索没确认产品就只发追问，宁可少答一句，
+    # 也不猜型号与报价。旧兜底会报出 S1 时代的 "SKU X-200 v1" —— 那个标识在知识库里
+    # 查不到，等于给买家一条断链的引用。
 
     # ---- 检索取证（S3）----
     def _retrieve(self, request: AgentRequest):
-        """返回 (产品块, 命中列表)；检索器不可用时返回 (None, [])。"""
+        """返回 (产品块, 命中列表, 规格记录)。
+
+        三者的职责：
+          产品块  —— 描述性文本版本（四语之一），用于判断"是哪个型号"
+          命中列表 —— 证据（证书、法规、术语、产品块）
+          规格记录 —— 数值的唯一真源（价格/交期/MOQ/负荷）
+        """
         if self.retriever is None:
-            return None, []
+            return None, [], None
         profile = request.context.get("customer") or {}
+        country = str(profile.get("country", "") or "")
         query = SearchQuery(
             text=request.message,
             lang=request.language.value,
-            buyer_country=str(profile.get("country", "")),
+            buyer_country=country,
             today=date.today(),
             top_k=8,
         )
-        hits = self.retriever.search(query)
+        hits = list(self.retriever.search(query))
         # 只有**结构化通道**（型号/证书号等精确命中）确认的产品才能进草稿。
         # 词法通道命中的产品只说明"这类产品可能相关"，不足以据此报具体型号的价格与交期。
-        product = next((h.chunk for h in hits
-                        if h.chunk.doc_type == "产品条目" and "structured" in h.channels), None)
-        return product, hits
+        product = self._pick_product(hits, request.language.value)
+        if product is None:
+            return None, hits, None
+        sku = str(product.identifiers.get("sku", ""))
+        # 数值只从**结构化规格记录**取（数值的唯一真源）
+        spec = self._fetch_spec(sku, country, request.language.value) if sku else None
+        cert_nos = ((spec.extra.get("certificates") if spec is not None else None)
+                    or product.extra.get("certificates") or [])
+        for cert_no in cert_nos:
+            chunk = self._fetch_cert(str(cert_no), country, request.language.value)
+            if chunk is not None:
+                hits.append(SearchHit(chunk=chunk, score=1.0, channel="structured",
+                                      reasons=[f"证书精确命中 {cert_no}"]))
+        return product, hits, spec
+
+    @staticmethod
+    def _pick_product(hits, lang: str):
+        """挑产品：必须是结构化通道确认的；同型号有多语版本时优先买家语种。"""
+        cands = [h.chunk for h in hits
+                 if h.chunk.doc_type == "产品条目" and "structured" in h.channels]
+        if not cands:
+            return None
+        for c in cands:
+            if c.lang == lang:
+                return c
+        return cands[0]
+
+    def _fetch_spec(self, sku: str, country: str, lang: str):
+        """按型号取结构化规格记录（数值的唯一真源）。"""
+        query = SearchQuery(text=sku, lang=lang, buyer_country=country,
+                            today=date.today(), top_k=5)
+        for h in self.retriever.search(query):
+            if h.chunk.doc_type == "产品规格" and h.chunk.identifiers.get("sku") == sku:
+                return h.chunk
+        return None
+
+    def _fetch_cert(self, cert_no: str, country: str, lang: str):
+        """按证书号精确回查证书块（证书不按买家国别过滤，FR-KB-06）。"""
+        query = SearchQuery(text=cert_no, lang=lang, buyer_country=country,
+                            today=date.today(), top_k=3)
+        for h in self.retriever.search(query):
+            if h.chunk.doc_type == "证书" and h.chunk.identifiers.get("cert_no") == cert_no:
+                return h.chunk
+        return None
 
     # ---- 主流程 ----
     def handle(self, request: AgentRequest) -> AgentResult:
         message = request.message
         lang = request.language
         intents = classify_intent(message)
-        product_chunk, hits = self._retrieve(request)
+        product_chunk, hits, spec_chunk = self._retrieve(request)
         if product_chunk is not None:
-            # 知识库块：结构化字段在 extra，标识（型号/HS）在 identifiers
-            info = dict(product_chunk.extra)
+            # 知识库块：数值在结构化规格记录的 extra，标识（型号/HS）在 identifiers
+            info = dict(spec_chunk.extra if spec_chunk is not None else product_chunk.extra)
             info["sku"] = product_chunk.identifiers.get("sku", product_chunk.doc_id)
             info.setdefault("certificates", [])
             info.setdefault("name", product_chunk.title)
-            products = [info]
+            if "price_low" not in info or "lead_time_days" not in info:
+                # 找不到结构化规格记录 → 不猜价格，走追问
+                info = {}
+            products = [info] if info else []
             citations = self._citations_from_hits(
                 hits, product=product_chunk,
                 buyer_country=str((request.context.get("customer") or {}).get("country", "")))
         else:
-            products = self._match_products(message)
-            citations = self._citations_for(products)
+            # 检索没确认产品 → 只发追问（R11-05：不得回退到写死常量报型号与价格）
+            products = []
+            citations = []
 
         # 置信度：命中产品 + 证据越多越可信；无证据 → 低置信（走 GATE-06）
+        country = str((request.context.get("customer") or {}).get("country", "") or "").strip()
         confidence = 0.35 + (0.25 if products else 0.0) + min(0.25, 0.05 * len(citations))
-        needs_human = confidence < 0.55
+        # 国别未知 → 合规要求无法落地（FR-GRC-05），必须转人工并先问目的港（R12-03）
+        needs_human = confidence < 0.55 or not country
 
         if not products:
             body = self._clarify_body(lang, intents)
@@ -221,41 +257,47 @@ class InquiryAgent(BaseAgent):
             )
 
         p = products[0]
-        # 证书行：只认**未过期**的证书（过期证书不得出现在对外内容里）
+        # 证书行：只用**产品结构化字段里声明、且 covers 覆盖本型号**的证书：
+        #   - covers 为空的是工厂体系证书，走体系模板，不能说"型号被覆盖"（R11-10）
+        #   - 过期证书不进对外内容（时效闸门）
+        #   - 别的型号的证书，强制性地不能说成覆盖本型号（R12-01）
         cert_line = "—"
         expired_notes = []
-        cert_candidates = []
-        if product_chunk is not None:
-            cert_candidates = [h.chunk for h in hits if h.chunk.doc_type == "证书"]
-        else:
-            cert_candidates = []
-            for cert_no in p.get("certificates", []):
-                c = next((x for x in self.certificates if x["cert_no"] == cert_no), None)
-                if c:
-                    cert_candidates.append(c)
-        for c in cert_candidates:
-            if isinstance(c, dict):
-                cert_no, ctype, valid_until = c["cert_no"], c["type"], c["valid_until"]
-            else:
-                cert_no = c.identifiers.get("cert_no", c.doc_id)
-                ctype = c.extra.get("cert_type", "证书")
-                valid_until = c.valid_until.date().isoformat() if c.valid_until else "—"
-            if isinstance(valid_until, str) and valid_until < date.today().isoformat():
+        sku = str(p.get("sku", ""))
+        cert_nos = [str(x) for x in (p.get("certificates") or [])]
+        cert_by_no = {str(h.chunk.identifiers.get("cert_no", h.chunk.doc_id)): h.chunk
+                      for h in hits if h.chunk.doc_type == "证书"}
+        for cert_no in cert_nos:
+            c = cert_by_no.get(cert_no)
+            if c is None:
+                continue
+            covers = [str(x).upper() for x in (c.extra.get("covers") or [])]
+            if covers and sku.upper() not in covers:
+                continue
+            ctype = c.extra.get("cert_type", "证书")
+            valid_until = c.valid_until.date().isoformat() if c.valid_until else "—"
+            if c.valid_until is not None and c.valid_until.date() < date.today():
                 expired_notes.append(f"{cert_no} 已于 {valid_until} 过期，不予引用")
                 continue
-            cert_line = CERT_LINE[lang].format(cert_no=cert_no, cert_type=ctype, valid_until=valid_until)
+            tpl = CERT_LINE[lang] if covers else CERT_LINE_SYSTEM[lang]
+            cert_line = tpl.format(cert_no=cert_no, cert_type=ctype, valid_until=valid_until)
             break
         body = TEMPLATES[lang].format(
             sku=p["sku"], moq=p["moq"], price_low=p["price_low"], price_high=p["price_high"],
             terms=p["terms"], port=p["port"], lead_time=p["lead_time_days"],
             cert_line=cert_line, ask_line=ASK_LINE[lang],
         )
+        if not country:
+            next_action = "买家所在国未知：先确认目的港所在国（合规要求按目的国落地），再人工签核"
+        elif needs_human:
+            next_action = "置信度不足，请人工确认后再发送"
+        else:
+            next_action = "价格与交期需人工签核后发送"
         draft = Draft(
             thread_id=request.thread.thread_id, lang=lang, body=body,
             intent_labels=intents, confidence=round(confidence, 2), citations=citations,
             needs_human_confirmation=needs_human,
-            next_action=("置信度不足，请人工确认后再发送" if needs_human
-                         else "价格与交期需人工签核后发送"),
+            next_action=next_action,
             model="stub-template",
         )
         return AgentResult(
@@ -286,7 +328,12 @@ class InquiryAgent(BaseAgent):
                 if sku and covers and sku.upper() not in covers:
                     continue        # 与本型号无关的证书不引用
             if c.doc_type == "法规条款":
-                if country and c.countries and country not in [x.upper() for x in c.countries]:
+                # 国别未知 → 一条**国别专属**条款都不能进对外内容（R11-03）：
+                # 一封报价同时承诺欧盟/埃及/巴西三国的合规要求，是对买家的失真陈述。
+                if not country:
+                    if c.countries:
+                        continue
+                elif c.countries and country not in [x.upper() for x in c.countries]:
                     continue        # 不适用于买家国别的法规不引用
                 if hs and c.hs_codes and not (hs & set(c.hs_codes)):
                     continue

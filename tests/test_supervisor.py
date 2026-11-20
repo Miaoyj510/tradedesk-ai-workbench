@@ -11,7 +11,13 @@ from tradedesk.store.sqlite_store import SqliteStateStore
 def sup(tmpdir_local):
     store = SqliteStateStore(str(tmpdir_local / "sup.db"))
     from tradedesk.api.deps import build_registry
-    s = Supervisor(store=store, registry=build_registry())
+    from tradedesk.data.kb_seed import KB_VERSION, load_kb
+    from tradedesk.retrieval.store_retriever import StoreRetriever
+    # 询盘 Agent 要接上真实检索器与真实知识库，否则草稿里的型号与价格只能靠写死常量
+    # —— 那条路径在 R11 里已经被删掉了。
+    load_kb(store, KB_VERSION)
+    retriever = StoreRetriever(store, KB_VERSION)
+    s = Supervisor(store=store, registry=build_registry(retriever=retriever))
     s.store = store
     yield s
     store.close()

@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Dict, Optional
 
 
+# 知识库版本号的**唯一真源**在 data/kb_seed.py —— 以前这里另写了一份字面量，
+# 结果知识库内容一改，配置还指着旧版本：检索层读的是旧块，审核断言读的是新块，
+# 同一份"引用回指"检查就变成"引用全都对不上"。版本号只能有一处。
+from .data.kb_seed import KB_VERSION
+
+
 def _load_dotenv(path: Path) -> Dict[str, str]:
     """极简 .env 解析（避免为一个小功能引入依赖）。"""
     env: Dict[str, str] = {}
@@ -43,7 +49,7 @@ class Config:
     # 检索
     embedding_model: str = "BGE-M3"
     reranker_model: str = "bge-reranker-v2-m3"
-    kb_version: str = "kb-2026.11-b"
+    kb_version: str = KB_VERSION
     list_version: str = "sanctions-2026.11-a"
     # 业务阈值
     # SLA 按业务类型可配置（FR-ORC-08：≥3 类）
@@ -79,7 +85,7 @@ class Config:
             llm_timeout_s=int(get("TRADEDESK_LLM_TIMEOUT_S", "30")),
             embedding_model=get("TRADEDESK_EMBEDDING_MODEL", "BGE-M3"),
             reranker_model=get("TRADEDESK_RERANKER_MODEL", "bge-reranker-v2-m3"),
-            kb_version=get("TRADEDESK_KB_VERSION", "kb-2026.11-b"),
+            kb_version=get("TRADEDESK_KB_VERSION", KB_VERSION),
             list_version=get("TRADEDESK_LIST_VERSION", "sanctions-2026.11-a"),
             sla_first_response_s=int(get("TRADEDESK_SLA_FIRST_RESPONSE_S", "300")),
             sla_quote_s=int(get("TRADEDESK_SLA_QUOTE_S", "3600")),

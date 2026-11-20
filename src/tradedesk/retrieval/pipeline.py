@@ -89,13 +89,19 @@ def expand_tokens(text: str, concepts: Iterable[str]) -> List[str]:
     return tokens
 
 
+# 国别过滤只作用于这两类（FR-KB-05：「法规与名单条目……按买家所在国 + 当前日期过滤」）。
+# 证书的 countries 是"适用法域"，不是"买家国别专属的法规"；按买家国别把证书滤掉，
+# 会让买家自己的产品证书消失、正文改由一张不覆盖任何型号的体系证书顶替（R12-02）。
+COUNTRY_SCOPED_TYPES = ("法规条款", "名单条目")
+
+
 def filter_by_attributes(chunks: List[KBChunk], query: SearchQuery) -> List[KBChunk]:
     """步骤 4a：结构化过滤（国别 / HS 编码 / 型号 / 文档类型）。"""
     out = []
     for c in chunks:
         if query.doc_types and c.doc_type not in query.doc_types:
             continue
-        if c.countries and query.buyer_country:
+        if c.doc_type in COUNTRY_SCOPED_TYPES and c.countries and query.buyer_country:
             if query.buyer_country.upper() not in [x.upper() for x in c.countries]:
                 continue
         if c.hs_codes and query.hs_codes:
@@ -196,6 +202,12 @@ def _structured_hits(chunks: List[KBChunk], query: SearchQuery) -> List[SearchHi
     return hits
 
 
+def _identity_key(chunk: KBChunk) -> str:
+    """去重用的身份键：同一型号的多语版本算同一条，但规格记录单独计。"""
+    sku = chunk.identifiers.get("sku")
+    return f"{chunk.doc_type}:{sku}" if sku else f"chunk:{chunk.chunk_id}"
+
+
 def _lexical_hits(chunks, tokens, concepts=None):
     """步骤 5a：词法通道（BM25 + 字段加权）。
 
@@ -285,19 +297,27 @@ class RetrievalPipeline:
 
     # ---- 步骤 5：双通道召回
     def retrieve(self, query: SearchQuery, tokens: List[str]) -> Dict[str, List[SearchHit]]:
-        lexical = _lexical_hits(self.chunks, tokens)
+        # 与 search() 同口径：属性过滤对两个通道同样生效
+        kept, _ = self.filter(query)
+        scope = kept
+        lexical = _lexical_hits(scope, tokens)
         return {"lexical": lexical[: max(query.top_k * 3, 10)],
-                "structured": _structured_hits(self.chunks, query)}
+                "structured": _structured_hits(scope, query)}
 
     # ---- 主流程
     def search(self, query: SearchQuery) -> List[SearchHit]:
         today = query.today or date.today()
         concepts, tokens = self.enrich(query.text)
         kept, dropped = self.filter(query)
-        # 只在"未被属性过滤掉"的块上打分，但结构化通道仍看全集（编号可能不在过滤结果里）
-        scope = kept if kept else self.chunks
+        # 属性过滤是**硬约束**，两个通道一视同仁（R11-01 / R11-02）：
+        # 过期、别国、HS 不对的块都不参与召回。
+        # 过滤后为空就返回空 —— 不能"那就不滤了"：那等于让 HS 编码不匹配的产品
+        # 照样被检索出来、报上价格。
+        if not kept:
+            return []
+        scope = kept
         lexical = _lexical_hits(scope, tokens, concepts)[: max(query.top_k * 3, 10)]
-        structured = _structured_hits(self.chunks, query)
+        structured = _structured_hits(scope, query)
         # 精确匹配通道权重更高（k=10 vs 词法 k=60）
         merged = rrf_merge([lexical, structured], k_by_channel=[60, 10])
         # 步骤 7：引用装配 + 时效标注
@@ -313,9 +333,16 @@ class RetrievalPipeline:
             if h.chunk.identifiers:
                 h.reasons.append("引用标识：" + ",".join(f"{k}={v}" for k, v in h.chunk.identifiers.items()))
             out.append(h)
-            if len(out) >= query.top_k:
-                break
-        return out
+        # 同一产品的多语版本只留一条（提问语种优先）：否则一次召回会把四个语言
+        # 版本都顶上来，把证书与法规挤出结果（拆 4 语后的副作用）。
+        best: Dict[str, SearchHit] = {}
+        for h in out:
+            key = _identity_key(h.chunk)
+            cur = best.get(key)
+            if cur is None or (h.chunk.lang == query.lang and cur.chunk.lang != query.lang):
+                best[key] = h
+        ordered = sorted(best.values(), key=lambda h: h.score, reverse=True)
+        return ordered[: query.top_k]
 
 
 def bm25_doc(chunk: KBChunk) -> List[str]:
