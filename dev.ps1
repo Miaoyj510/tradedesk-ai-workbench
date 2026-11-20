@@ -154,6 +154,13 @@ switch ($Command.ToLower()) {
     else { & $py (Join-Path $Root "scripts/audit_s3.py") }
     exit $LASTEXITCODE
   }
+  "audit4" {
+    $py = Get-PythonExe
+    Write-Host "[audit4] 运行 S4 独立审核（审核 agent 的断言，非自证）" -ForegroundColor Cyan
+    if ($Dsn) { & $py (Join-Path $Root "scripts/audit_s4.py") --dsn $Dsn }
+    else { & $py (Join-Path $Root "scripts/audit_s4.py") }
+    exit $LASTEXITCODE
+  }
   "index" {
     $py = Get-PythonExe
     Write-Host "[index] 建立知识库向量索引（**会调云端嵌入 API，会计费**）" -ForegroundColor Cyan
@@ -214,6 +221,7 @@ TradeDesk-AI 开发脚本（项目根：$Root）
   audit3   S3 独立审核（审核 agent 断言，见 docs/S3-AUDIT-R11.md；R11 缺陷修完前为红）
   serve    启动 HTTP 接口（FastAPI，/docs 有接口文档）
   push     推送当前分支到 GitHub（git 优先，失败自动切 API）
+  audit4   S4 独立审核（审核 agent 断言，见 docs/S4-AUDIT-R15.md；R15 缺陷修完前为红）
   index    建立知识库向量索引（显式动作，会调云端 API）
   clean    清理验证临时文件、缓存与 __pycache__
   # 说明：verify 跑完会自动清理临时物，clean 只是手动扫尾
