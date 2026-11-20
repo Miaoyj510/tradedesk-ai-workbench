@@ -305,7 +305,18 @@ class RetrievalPipeline:
                 "structured": _structured_hits(scope, query)}
 
     # ---- 主流程
-    def search(self, query: SearchQuery) -> List[SearchHit]:
+    def search(self, query: SearchQuery, dense_hits: Optional[List[SearchHit]] = None) -> List[SearchHit]:
+        """主检索入口。
+
+        三个通道（PRD 9.3）：
+          - 词法（BM25 + 字段加权）：k=60
+          - 结构化（型号/证书号/条款号精确命中）：k=10（**最高权重**）
+          - 稠密（向量语义）：k=100（**最低权重**，只是召回辅助）
+
+        为什么稠密通道权重最低：实测显示**向量检索分不清型号**（西语问 X-200，X-300 的向量排第一），
+        若给它大权重，会出现"买家问 X-200 却报 X-300 的价格"——这类错对买家不可接受。
+        型号识别的唯一权威是**结构化通道**。
+        """
         today = query.today or date.today()
         concepts, tokens = self.enrich(query.text)
         kept, dropped = self.filter(query)
@@ -319,7 +330,13 @@ class RetrievalPipeline:
         lexical = _lexical_hits(scope, tokens, concepts)[: max(query.top_k * 3, 10)]
         structured = _structured_hits(scope, query)
         # 精确匹配通道权重更高（k=10 vs 词法 k=60）
-        merged = rrf_merge([lexical, structured], k_by_channel=[60, 10])
+        # 精确命中压过词法长尾；稠密通道权重最低（只是召回辅助）
+        channels = [lexical, structured]
+        k_by_channel = [60, 10]
+        if dense_hits:
+            channels.append(dense_hits)
+            k_by_channel.append(100)
+        merged = rrf_merge(channels, k_by_channel=k_by_channel)
         # 步骤 7：引用装配 + 时效标注
         #   过期块直接丢弃（不得进入结果、更不得被引用）；
         #   尚未生效的条款保留但标记（可见，但不得当作"当前要求"输出）。

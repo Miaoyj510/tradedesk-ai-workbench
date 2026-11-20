@@ -21,6 +21,9 @@ class SearchQuery(BaseModel):
     doc_types: List[str] = Field(default_factory=list)
     today: Optional[date] = None     # 注入"当前日期"，保证时效过滤可测
     top_k: int = 5
+    # 是否允许稠密通道。内部的结构化回查（规格记录、证书号）设为 False：
+    # 它们是按**标识**取块，不需要语义，而且每次都要调云端 API（计费）。
+    use_dense: bool = True
 
 
 class SearchHit(BaseModel):
