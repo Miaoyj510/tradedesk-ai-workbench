@@ -59,11 +59,12 @@ class StoreRetriever:
         return self._cache
 
     def search(self, query: SearchQuery) -> List[SearchHit]:
-        dense = self._dense_hits(query) if getattr(query, "use_dense", True) else []
+        dense = self.dense_hits(query) if getattr(query, "use_dense", True) else []
         return RetrievalPipeline(self.chunks(), self.kb_version).search(query, dense_hits=dense)
 
     # ---- 稠密通道 ----
-    def _dense_hits(self, query: SearchQuery) -> List[SearchHit]:
+    def dense_hits(self, query: SearchQuery) -> List[SearchHit]:
+        """稠密通道命中（公开：评测脚本需单独取这一通道做对比）。"""
         emb = self.embedder
         idx = self.vector_index
         self.dense_skipped = None

@@ -24,6 +24,8 @@ from ..domain.models import Citation, Draft
 from .base import AgentRequest, AgentResult, AgentStatus as ResultStatus, BaseAgent
 
 # 询盘五类的多语关键词（对应 PRD 9.6 的重映射结果）
+# 词表是**子串匹配**（如 "late" 会命中 "late delivery"），所以词之间的包含关系会影响命中顺序。
+# 排序约束：**投诉先于物流**（“交货延迟”属于投诉，不能被 "delivery" 抹走）。
 INTENT_KEYWORDS: Dict[Intent, List[str]] = {
     Intent.PRICE: ["price", "precio", "prezzo", "quote", "cotizar", "cost",
                    "价格", "报价", "单价", "سعر", "ثمن"],
@@ -31,10 +33,17 @@ INTENT_KEYWORDS: Dict[Intent, List[str]] = {
                     "عينة", "نموذج"],
     Intent.SPEC: ["material", "specification", "spec", "材质", "规格", "载荷",
                   "capacidad", "مواصفات", "خامة"],
-    Intent.LOGISTICS: ["shipping", "freight", "logistics", "port", "incoterm",
-                       "运费", "物流", "港口", "شحن", "ميناء"],
-    Intent.COMPLAINT: ["complaint", "problem", "damaged", "索赔", "投诉", "破损",
-                      "queja", "reclamación", "شكوى"],
+    Intent.COMPLAINT: ["complaint", "problem", "damaged", "broken", "compensation", "late", "delay",
+                       "quality", "unhappy", "索赔", "投诉", "破损", "赔偿",
+                       "质量", "延误", "损坏",
+                       "queja", "reclamación", "reclamo", "dañado", "roto", "compensación",
+                       "calidad", "retraso", "descontentos",
+                       "شكوى", "تالف", "معو", "عيب",
+                       "تأخير", "عوض"],
+    Intent.LOGISTICS: ["shipping", "freight", "logistics", "port", "incoterm", "deliver", "shipment",
+                       "运费", "物流", "港口", "交货", "运输",
+                       "envío", "flete", "entregar",
+                       "شحن", "توصيل", "نقل", "ميناء", "تسليم"],
 }
 
 SKU_PATTERN = re.compile(r"\b([XM]-\d{2,4})\b", re.I)
