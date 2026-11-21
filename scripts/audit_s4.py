@@ -14,6 +14,12 @@ verify_s4.py 是实现 agent 交卷时的自证；本脚本是**审核方自己�
    `semantic=False`，且 4b 之前向量通道不得被宣称成"语义召回"。
 4. **越权与密钥**：任何对外内容与异常信息里都不得出现 API key。
 
+审核轮次
+--------
+- R15（§S1—§S9）：S4-4a 向量层
+- **R17（§S10—§S12）：S4-4b 稠密通道接入 RRF + S4-4c 语义召回评测框架**
+  结论见 `docs/S4-AUDIT-R17.md`。
+
 用法
     python scripts/audit_s4.py                # SQLite
     python scripts/audit_s4.py --dsn <DSN>    # PostgreSQL
@@ -59,6 +65,7 @@ from tradedesk.retrieval.embedders import (                   # noqa: E402
 from tradedesk.retrieval.indexer import (                     # noqa: E402
     chunk_text, embedder_tag, index_kb, load_index)
 from tradedesk.retrieval.pipeline import RetrievalPipeline     # noqa: E402
+from tradedesk.retrieval.store_retriever import StoreRetriever  # noqa: E402
 from tradedesk.retrieval.vector_index import VectorIndex      # noqa: E402
 from tradedesk.store.sqlite_store import SqliteStateStore     # noqa: E402
 
@@ -433,7 +440,7 @@ def audit_s6_wiring() -> None:
     pipe = RetrievalPipeline(store.list_kb_chunks(KB_VERSION), KB_VERSION)
     hits = pipe.search(SearchQuery(text="X-200 price", lang="en", top_k=5))
     chans = sorted({ch for h in hits for ch in h.channels})
-    check("向量通道尚未接入检索管线（4a 口径：只做向量层）",
+    check("未喂稠密命中时，管线只出词法 + 结构化两路",
           "dense" not in chans, f"命中用到的通道={chans}")
     clause("S15-26")
     # 索引加载失败不得阻断启动
@@ -567,10 +574,342 @@ def audit_s9_postgres() -> None:
 
 
 # --------------------------------------------------------------------------
+# §S10 S4-4b 稠密通道（第三通道的守则）
+# --------------------------------------------------------------------------
+class FakeSemanticEmbedder(HashEmbedder):
+    """假的"语义"嵌入器：只把 semantic 标成 True，用来验接线（它本身没有语义能力）。"""
+
+    name = "fake-semantic"
+    semantic = True
+    model = "fake"
+
+
+class FlakyTransport:
+    """前 n 次抛网络错误、之后正常返回（用来测重试与计费口径）。"""
+
+    def __init__(self, dim=4, fail_times=0):
+        self.dim = dim
+        self.fail_times = fail_times
+        self.calls = 0
+
+    def __call__(self, url, headers, payload, timeout):
+        self.calls += 1
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            raise OSError("connection reset")
+        n = len(payload.get("texts") or payload.get("input") or [])
+        return {"base_resp": {"status_code": 0}, "total_tokens": 3,
+                "vectors": [[0.1 * (i + 1) for i in range(self.dim)] for _ in range(n)]}
+
+
+def audit_s10_dense_channel() -> None:
+    section("§S10 S4-4b 稠密通道（语义守卫 / 权重 / 降级 / 失效 / 计费）")
+    store = new_store()
+    load_kb(store, KB_VERSION)
+    blocks = store.list_kb_chunks(KB_VERSION)
+    emb = FakeSemanticEmbedder(dim=64)
+    index_kb(store, emb, KB_VERSION, chunks=blocks)
+    idx = load_index(store, KB_VERSION)
+    q = SearchQuery(text="¿Cuál es su mejor precio para X-200?", lang="es", top_k=5)
+
+    clause("R17-01")
+    r = StoreRetriever(store, KB_VERSION, embedder=emb, vector_index=idx)
+    hits = r.search(q)
+    check("语义嵌入器下稠密通道必须被接进检索管线",
+          any("dense" in h.channels for h in hits),
+          f"命中用到的通道={sorted({c for h in hits for c in h.channels})}")
+
+    clause("R17-02")
+    r2 = StoreRetriever(store, KB_VERSION, embedder=HashEmbedder(dim=64), vector_index=idx)
+    hits2 = r2.search(q)
+    check("假嵌入器（semantic=False）不得开启稠密通道",
+          not any("dense" in h.channels for h in hits2) and bool(r2.dense_skipped),
+          f"通道={sorted({c for h in hits2 for c in h.channels})} 原因={r2.dense_skipped}")
+
+    clause("R17-03")
+    from tradedesk.retrieval.pipeline import RRF_K
+    check("稠密通道权重必须最低（k 最大）、结构化最高（k 最小）",
+          RRF_K["dense"] > RRF_K["lexical"] > RRF_K["structured"], str(RRF_K))
+
+    clause("R17-04")
+    specs = [h.chunk.chunk_id for h in hits
+             if "dense" in h.channels and h.chunk.doc_type == "产品规格"]
+    check("「产品规格」块不得进稠密通道（模板句无语义信息量）", not specs, str(specs))
+
+    clause("R17-05")
+    class BrokenEmbedder(FakeSemanticEmbedder):
+        def embed_query(self, text):
+            raise RuntimeError("云端嵌入失败")
+    r3 = StoreRetriever(store, KB_VERSION, embedder=BrokenEmbedder(dim=64), vector_index=idx)
+    hits3 = r3.search(q)
+    check("查询嵌入失败只降级、不得拖垮检索",
+          bool(hits3) and not any("dense" in h.channels for h in hits3)
+          and bool(r3.dense_skipped),
+          f"命中 {len(hits3)} 条 原因={r3.dense_skipped}")
+
+    clause("R17-06")
+    # 重建索引（换嵌入器 → 向量全变）后，**进程内**的稠密通道必须跟着变。
+    # 否则 S3 的 R11-07（改库后同进程不生效）在向量层重演：库里是新向量，
+    # 检索用的还是启动时载入的旧快照。
+    emb2 = FakeSemanticEmbedder(dim=64)
+    emb2.ngram = 5                      # 同文本 → 不同向量
+    index_kb(store, emb2, KB_VERSION, chunks=blocks, force=True)
+    fresh = load_index(store, KB_VERSION)
+    stale = StoreRetriever(store, KB_VERSION, embedder=emb2, vector_index=idx)
+    fresh_r = StoreRetriever(store, KB_VERSION, embedder=emb2, vector_index=fresh)
+    stale_pairs = [(h.chunk.chunk_id, h.score) for h in stale.dense_hits(q)]
+    fresh_pairs = [(h.chunk.chunk_id, h.score) for h in fresh_r.dense_hits(q)]
+    check("重建索引后，进程内稠密通道必须使用新向量（索引快照要能失效）",
+          stale_pairs == fresh_pairs,
+          f"陈旧快照前 2 条={stale_pairs[:2]}｜库里现向量前 2 条={fresh_pairs[:2]}"
+          f"（检索器把启动时的索引当快照，不重载）")
+
+    clause("R17-07")
+    nul = NullEmbedder()
+    two = nul.embed(["手动搬运车", "电动搬运车"])
+    check("占位嵌入器对不同文本必须给出不同向量（否则向量通道全是同一向量）",
+          two[0] != two[1],
+          f"两条文本的向量完全相同（余弦恒为 1，检索无从排序）："
+          f"embed(['a','b'])[0] == embed(['a','b'])[1]")
+
+    clause("R17-08")
+    # 计费口径：dense_calls 数的是 embed_query 次数，不是**实际云端调用次数**。
+    # 网络故障重试会多花钱，但计量看不出来 → S5 的 ≤0.2 元/条 基线会低估。
+    t = FlakyTransport(dim=4, fail_times=2)
+    remb = RemoteEmbedder(base_url="https://example.invalid", api_key="K", dim=4,
+                           retries=2, transport=t)
+    fake_idx = VectorIndex([(c.chunk_id, [0.1, 0.2, 0.3, 0.4]) for c in blocks])
+    r4 = StoreRetriever(store, KB_VERSION, embedder=remb, vector_index=fake_idx)
+    r4.search(q)
+    check("成本计量必须等于实际云端调用次数（重试也是要花钱的）",
+          r4.dense_calls == remb.calls,
+          f"计量 dense_calls={r4.dense_calls}，实际 HTTP 调用={remb.calls}"
+          f"（重试 2 次后成功，只记 1 次 → 成本基线低估到 1/3）")
+
+    clause("R17-09")
+    # 稠密通道不得绕过属性过滤与时效闸门：dense 命中必须落在过滤后的范围内
+    expired = [h.chunk.chunk_id for h in r.search(
+        SearchQuery(text="CERT-CE-1890 certificate", lang="en", top_k=8))
+        if "dense" in h.channels and h.chunk.identifiers.get("cert_no") == "CERT-CE-1890"]
+    check("已废止的证书不得被稠密通道召回", not expired, str(expired))
+
+
+# --------------------------------------------------------------------------
+# §S11 S4-4c 评测框架（口径优先：数字必须站得住）
+# --------------------------------------------------------------------------
+def _load_eval_module():
+    """按路径载入 scripts/eval_retrieval.py（它不是包）。"""
+    import importlib.util
+    path = ROOT / "scripts" / "eval_retrieval.py"
+    spec = importlib.util.spec_from_file_location("audit_eval_retrieval", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def audit_s11_eval() -> None:
+    section("§S11 S4-4c 评测框架（指标口径 / 稠密通道可观测 / 语料质量 / 编号）")
+    ev = _load_eval_module()
+    from tradedesk.data.inquiry_corpus import build_corpus, INTENTS
+    cases = build_corpus()
+
+    clause("R17-10")
+    # PRD 12.3 的「意图 Macro-F1」是**五类意图**的宏平均。
+    # 评测脚本把没有样本的 "unknown" 也算进分母 → 每个语种被系统性压低 1/6。
+    pairs = {lang: [] for lang in ("en", "es", "ar", "zh")}
+    for c in cases:
+        pairs[c.lang].append((c.intent, ev.predict_intent(c.text)))
+    for lang in ("en", "es", "ar"):
+        got, _per = ev.macro_f1(pairs[lang])
+        sub = pairs[lang]
+        tot = 0.0
+        for lab in INTENTS:
+            tp = sum(1 for g, p in sub if g == lab and p == lab)
+            fp = sum(1 for g, p in sub if g != lab and p == lab)
+            fn = sum(1 for g, p in sub if g == lab and p != lab)
+            pr = tp / (tp + fp) if (tp + fp) else 0.0
+            rc = tp / (tp + fn) if (tp + fn) else 0.0
+            tot += (2 * pr * rc / (pr + rc)) if (pr + rc) else 0.0
+        prd = round(tot / len(INTENTS), 4)
+        check(f"{lang} 的 Macro-F1 必须与 PRD 12.3 同口径（不含无样本标签）",
+              abs(got - prd) < 1e-6,
+              f"脚本报 {got}（分母含无样本的 unknown）｜PRD 五类口径 {prd}｜"
+              f"差 {round(got - prd, 4)}")
+
+    clause("R17-11")
+    src = (ROOT / "scripts" / "eval_retrieval.py").read_text(encoding="utf-8")
+    check("评测报表必须能区分『稠密通道失败』与『稠密通道召回差』",
+          "dense_skipped" in src,
+          "查询嵌入失败会逐条降级（retriever.dense_skipped 有记录），"
+          "但评测脚本从不读它 → 稠密通道指标全是 0.000，报表头部却照写『启用』，"
+          "读者会误判成『模型不行』而不是『通道没跑』（R15-04 同型）")
+
+    clause("R17-12")
+    check("评测必须给出稠密通道的调用次数与成本口径（≤0.2 元/条 的计量基础）",
+          "dense_calls" in src,
+          "评测跑了每条语料 1 次云端嵌入（160 次），报表里既没有调用次数也没有成本，"
+          "跑一次 eval 的真实花费不可见")
+
+    clause("R17-13")
+    # 待验证项编号是 PRD 14.3 的全局编号表，不得撞号
+    prd = (ROOT / "PRD-外贸业务员的AI数字员工工作台-v1.0.md").read_text(encoding="utf-8")
+    prd_rows = {}
+    for m in re.finditer(r"^\|\s*(V-\d\d)\s*\|\s*([^|]+)\|", prd, re.M):
+        prd_rows.setdefault(m.group(1), m.group(2).strip())
+    base = (ROOT / "docs" / "S4-EVAL-BASELINE.md").read_text(encoding="utf-8")
+    base_rows = {}
+    for m in re.finditer(r"^\|\s*(V-\d\d)\s*\|\s*([^|]+)\|", base, re.M):
+        base_rows.setdefault(m.group(1), m.group(2).strip())
+    clash = []
+    for num, topic in sorted(base_rows.items()):
+        ref = prd_rows.get(num, "")
+        if not ref:
+            continue
+        # 主题词重叠判定：PRD 那行的关键词应当出现在基线那一行里
+        keys = [w for w in re.split(r"[（）()/、，,\s]+", ref) if len(w) >= 3]
+        hit = any(k[:4] in topic for k in keys)
+        if not hit:
+            clash.append(f"{num}: PRD=「{ref[:18]}…」 vs 基线=「{topic[:18]}…」")
+    check("待验证项编号不得与 PRD 14.3 撞号（编号是全局唯一表）",
+          not clash, "；".join(clash))
+
+    clause("R17-14")
+    # 语料质量：审核方人工挑出的非词（可复现清单见 docs/S4-AUDIT-R17.md 附录）
+    nonwords = {
+        "ar": ["ناسرفع", "التصليل", "التمتليم", "الضحة", "الطراة", "مطاطع", "أكددوا",
+               "موعددار", "تكلفونة", "معلكة", "بخص", "الطلب الأدنى"],
+        "es": ["zanpan", "Compénsennos", "Confirmenme", "merchancía"],
+    }
+    bad = []
+    for c in cases:
+        for w in nonwords.get(c.lang, []):
+            if w in c.text:
+                bad.append(f"{c.case_id}:{w}")
+    per_lang = {}
+    for c in cases:
+        if any(w in c.text for w in nonwords.get(c.lang, [])):
+            per_lang[c.lang] = per_lang.get(c.lang, 0) + 1
+    total_lang = {}
+    for c in cases:
+        total_lang[c.lang] = total_lang.get(c.lang, 0) + 1
+    check("自建语料不得含成规模的非词（ar/es 是买家语种，语料本身就是被评对象）",
+          len(bad) <= 2,
+          f"含非词的样本 {len(bad)} 条：" + "，".join(bad[:8])
+          + f"｜各语种占比 " + "，".join(f"{k}={per_lang.get(k,0)}/{total_lang.get(k,0)}"
+                                        for k in ("en", "es", "ar")))
+
+    clause("R17-15")
+    named = sum(1 for c in cases if any(m in c.text for m in ("X-200", "X-300", "M-77")))
+    scored = sum(1 for c in cases if c.expect_sku)
+    ratio = named / len(cases) if cases else 0
+    m = re.search(r"(\d+)%\s*点名了型号", base)
+    claimed = int(m.group(1)) if m else -1
+    check("基线文档里『点名型号的比例』必须与语料实际一致（它是头条数字的免责说明）",
+          m is not None and abs(claimed - ratio * 100) <= 2,
+          f"文档写 {claimed}%，语料实际点名 {named}/{len(cases)} = {round(ratio * 100, 1)}%"
+          f"（参与 SKU 评分的 {scored} 条 100% 点名 —— 这才是要说清的那句）")
+
+    clause("R17-16")
+    check("公开基准层必须独立成表、不得与自建集合并算总分（PRD 12.3 分层规则）",
+          "公开基准" in base and not re.search(r"MIRACL[^\n]*\d\.\d", base),
+          "基线文档把公开基准体检层单列，且明确标注不可达 → 符合分层规则")
+
+    clause("R17-17")
+    check("语料覆盖度不足必须显式披露（PRD 12.3 缺失即披露）",
+          ("缩减版" in base) and ("V-10" in base or "语料扩量" in base),
+          "基线文档写明是缩减版并登记待验证项")
+
+    clause("R17-18")
+    note("评测脚本不看 TRADEDESK_EMBEDDER_ENABLED（那只管应用启动）",
+         "只要 .env 里有 key，跑一次 dev.ps1 eval 就是 160 次云端查询嵌入调用"
+         "（每条语料 1 次、无缓存无批量），脚本既没有开关也没有提示")
+
+    clause("R17-19")
+    note("评测脚本在 --dsn 模式下直接往传入的库写种子",
+         "audit_s2/audit_s3 都是自建独立库并回收，eval 不是 → "
+         "误把 --dsn 指到 tradedesk_a 会污染实现方的库")
+
+
+# --------------------------------------------------------------------------
+# §S12 PostgreSQL 稠密通道（版本隔离 / ANN 索引 / 双后端一致）
+# --------------------------------------------------------------------------
+def audit_s12_postgres_dense() -> None:
+    section("§S12 PostgreSQL 稠密通道（版本隔离 / ANN 索引 / 双后端一致）")
+    if not DSN:
+        note("本次未跑 PostgreSQL", "加 --dsn <DSN> 再跑一次")
+        return
+    import psycopg
+    from tradedesk.store.postgres_store import PostgresStateStore
+
+    head = _pg_split(DSN)
+    _SEQ[0] += 1
+    name = f"audit_s4b_{_SEQ[0]:02d}"
+    _pg_exec(head + "postgres", f'CREATE DATABASE "{name}"')
+    _PG_DBS.append((head, name))
+    dsn = head + name
+
+    clause("R17-20")
+    # 模拟"存量库升级"：4a 时代建的表（有 embedding 列、没有 content_fp、没有 ANN 索引）
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        conn.execute(
+            "CREATE TABLE kb_embeddings ("
+            "  chunk_id TEXT PRIMARY KEY,"
+            "  kb_version TEXT NOT NULL DEFAULT '',"
+            "  model TEXT NOT NULL DEFAULT '',"
+            "  dim INTEGER NOT NULL DEFAULT 0,"
+            "  embedding vector(4),"
+            "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+    st = PostgresStateStore(dsn, vector_dim=4)
+    _STORES.append(st)
+    with psycopg.connect(dsn, autocommit=True) as conn:
+        idxs = [r[0] for r in conn.execute(
+            "SELECT indexname FROM pg_indexes WHERE tablename='kb_embeddings'").fetchall()]
+    check("存量库（4a 建的表）升级后也必须建上 ANN 索引（HNSW）",
+          "idx_kb_embeddings_hnsw" in idxs,
+          f"存量库升级后的索引={idxs or '无'} —— 近邻检索退化为全表线性扫描，"
+          f"而验收 4b-07 写的是『走 pgvector + HNSW（生产形态）』；"
+          f"本机 tradedesk_a / tradedesk_b / tradedesk_audit_b 实测也只有 pkey")
+
+    clause("R17-21")
+    # 版本隔离：近邻检索必须按 kb_version 过滤（内存口径 list_kb_embeddings 是过滤的）
+    load_kb(st, KB_VERSION)
+    blocks = st.list_kb_chunks(KB_VERSION)
+    emb = FakeSemanticEmbedder(dim=4)
+    index_kb(st, emb, KB_VERSION, chunks=blocks)
+    # 塞一批**别的库版本**的残留向量（换库版本后旧向量不会自动清）
+    for i in range(12):
+        st.upsert_kb_embedding(f"KB-OLD-{i:02d}", "kb-old", "fake-semantic/fake/4",
+                               [0.9, 0.1, 0.0, 0.0])
+    pairs = st.search_kb_vectors([0.9, 0.1, 0.0, 0.0], top_k=8)
+    old = [cid for cid, _s in pairs if cid.startswith("KB-OLD")]
+    check("PostgreSQL 近邻检索必须按库版本过滤（旧版本向量不得进结果）",
+          not old, f"返回里混进了别的库版本的向量 {old[:5]}（共 {len(pairs)} 条）")
+
+    clause("R17-22")
+    # 后果：旧版本向量会占满 LIMIT 的名额 → 稠密通道在 PG 上静默变空
+    # （把旧向量设成与查询向量完全一致 —— 换库版本后旧向量留在库里正是这种情形）
+    qv = emb.embed_query("precio X-200")
+    for i in range(12):
+        st.upsert_kb_embedding(f"KB-OLD2-{i:02d}", "kb-old", "fake-semantic/fake/4", qv)
+    retriever = StoreRetriever(st, KB_VERSION, embedder=emb,
+                               vector_index=load_index(st, KB_VERSION))
+    hits = retriever.dense_hits(SearchQuery(text="precio X-200", lang="es", top_k=5))
+    check("旧版本向量不得把稠密通道挤空（PG 与 SQLite 必须一致）",
+          len(hits) > 0,
+          f"PG 稠密通道返回 {len(hits)} 条 —— top_k 的名额被 12 条旧版本向量占满"
+          f"（距离 0），当前库的向量被挤出 LIMIT，命中块在块表里又找不到 → 全被丢掉")
+
+    st.close()
+    _STORES.remove(st)
+
+
+# --------------------------------------------------------------------------
 def run_all() -> None:
     for fn in (audit_s1_contract, audit_s2_client, audit_s3_storage, audit_s4_indexer,
                audit_s5_vector_index, audit_s6_wiring, audit_s7_docs, audit_s8_secrets,
-               audit_s9_postgres):
+               audit_s9_postgres, audit_s10_dense_channel, audit_s11_eval,
+               audit_s12_postgres_dense):
         fn()
         close_stores()
 

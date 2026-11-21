@@ -321,6 +321,9 @@ def scenario_7_dense_channel(store) -> None:
     check("未开启稠密通道时不调用云端嵌入", r2.dense_calls == 0, str(r2.dense_calls))
 
     # --- 没有向量索引 → 降级双通道，不报错 ---
+    # 注意：检索器的向量索引现在**总是从存储层取**（按内容指纹失效），
+    # 所以“无索引”的真实条件是**库里没有向量** —— 先清掉库里的向量再测。
+    store.clear_kb_embeddings()
     r3 = StoreRetriever(store, KB_VERSION, embedder=FakeSemanticEmbedder(dim=_dim), vector_index=None)
     hits3 = r3.search(SearchQuery(text="Quote 5000 pcs of X-200 FOB Shenzhen", lang="en", top_k=5))
     chans3 = sorted({ch for h in hits3 for ch in h.channels})

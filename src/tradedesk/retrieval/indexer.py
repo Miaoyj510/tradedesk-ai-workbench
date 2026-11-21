@@ -59,6 +59,8 @@ def index_kb(store, embedder: Embedder, kb_version: str,
              force: bool = False) -> Dict[str, int]:
     """给知识库的块生成向量并落库。返回 {"indexed": n, "skipped": m}。"""
     blocks = chunks if chunks is not None else store.list_kb_chunks(kb_version)
+    # 注：规格块仍然被嵌入（白花三次钱）—— N1 记的是建议，但验收契款 S15-15 要求「索引全部块」，
+    # 改成不嵌入会让「块内容改了向量必须重算」这条断言失效（因为第一个块就是规格块）。
     tag = embedder_tag(embedder)
     if not force:
         # 失效键 = 模型版本 + **块内容指纹**（R15-01）：块正文改了（版本号没升）也必须重算向量

@@ -81,8 +81,13 @@ def predict_intent(text: str) -> str:
 
 
 def macro_f1(pairs):
-    """宏平均 F1（五类意图 + unknown）。"""
-    labels = INTENTS + ["unknown"]
+    """宏平均 F1（**PRD 12.3 口径：五类意图的宏平均**）。
+
+    R17-05：旧写法把没有样本的 "unknown" 也算进分母 → 每个语种被系统性压低 1/6，
+    报出来的数字与 PRD 门槛不可比。现在只对**五类意图**求宏平均；
+    预测出的 "unknown" 计为该类的混、误报（fn），不会无为地拉低分母。
+    """
+    labels = list(INTENTS)
     total = 0.0
     per = {}
     for lab in labels:
@@ -147,6 +152,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="分语种分通道检索评测")
     ap.add_argument("--dsn", default="")
     ap.add_argument("--json", default="")
+    ap.add_argument("--no-dense", action="store_true",
+                    help="关掉稠密通道（不调云端，不产生计费）")
+    ap.add_argument("--price-per-call", type=float, default=0.0,
+                    help="云端嵌入单价（元/次），用于估算成本；0 = 不估算（单价待核实）")
     args = ap.parse_args()
 
     print("TradeDesk-AI · S4-4c 检索评测（自建语料层）")
@@ -183,12 +192,32 @@ def main() -> int:
         except Exception as exc:
             print(f"[提示] 嵌入器初始化失败：{exc}")
         idx = load_index(store, KB_VERSION)
-        use_dense = embedder is not None and len(idx) > 0
-        print(f"稠密通道：{'**启用**（向量索引 ' + str(len(idx)) + ' 条）' if use_dense else '不启用（无 key 或无索引）'}")
+        use_dense = (not args.no_dense) and embedder is not None and len(idx) > 0
+        if args.no_dense:
+            print("\n稠密通道：已被 --no-dense 关掉（不调云端，不产生计费）")
+        elif not embedder:
+            print("\n稠密通道：**未生效**（没有读到 API key）")
+        elif not len(idx):
+            print("\n稠密通道：**未生效**（向量索引为空 —— 先跑 dev.ps1 index）")
+        else:
+            print(f"\n稠密通道：**启用**（向量索引 {len(idx)} 条）")
 
         pipeline = RetrievalPipeline(store.list_kb_chunks(KB_VERSION), KB_VERSION)
         retriever = StoreRetriever(store, KB_VERSION, embedder=embedder, vector_index=idx)
         stats, intent_pairs = evaluate(cases, pipeline, retriever, use_dense)
+        # 通道可观测（R17-06）：必须能区分「稠密通道**失败**」与「稠密通道**召回差**。
+        # 不分开的话，稠密指标全是 0.000，而报表头部却写「启用」 ——
+        # 读者会把「通道根本没跑」误读成「模型不行」（R15-04 同型）。
+        if use_dense:
+            calls = getattr(retriever.embedder, "calls", retriever.dense_calls)
+            cost = (f"，估算成本 ≈ ¥{calls * args.price_per_call:.4f}"
+                    f"（单价 {args.price_per_call} 元/次）") if args.price_per_call else \
+                   "（单价未核实，不估算金额；真实单价见待验证项）"
+            print(f"\n稠密通道计量：云端 HTTP 调用 {calls} 次{cost}")
+            if retriever.dense_skipped:
+                print(f"稠密通道未生效的原因：{retriever.dense_skipped}")
+        else:
+            print("\n稠密通道说明：**未生效** → 下面稠密通道的指标列不具备可比性，不得当作模型能力读。")
 
         print("\n" + "=" * 96)
         print("检索指标（SKU 级）：R@1 / R@3 / R@5 / MRR，仅统计有期望型号的样本")

@@ -11,6 +11,18 @@ from .base import SearchHit, SearchQuery
 from .pipeline import RetrievalPipeline
 
 
+def _vectors_fingerprint(items) -> str:
+    """向量集合的内容指纹（改向量就变）。"""
+    h = hashlib.blake2b(digest_size=16)
+    for cid, _model, vec in sorted(items, key=lambda x: x[0]):
+        h.update(cid.encode("utf-8"))
+        h.update(b"|")
+        for x in vec:
+            h.update(b"%.5f," % x)
+        h.update(b"\n")
+    return h.hexdigest()
+
+
 def _chunks_fingerprint(chunks: List[KBChunk]) -> str:
     """块集合的内容指纹（改任何一块的内容都会变）。"""
     h = hashlib.blake2b(digest_size=16)
@@ -42,7 +54,9 @@ class StoreRetriever:
         self.vector_index = vector_index
         self._cache: List[KBChunk] = []
         self._cache_key: Optional[tuple] = None
-        self.dense_calls = 0          # 稠密通道实际调用次数（计费口径，S5 结算）
+        self._vec_index = None            # 按内容指纹失效的向量索引（R17-03）
+        self._vec_fp = ""
+        self.dense_calls = 0          # 稠密通道**云端 HTTP 调用次数**（计费口径，S5 结算）
         self.dense_skipped: Optional[str] = None   # 未启用稠密通道的原因
 
     def chunks(self) -> List[KBChunk]:
@@ -59,18 +73,38 @@ class StoreRetriever:
         return self._cache
 
     def search(self, query: SearchQuery) -> List[SearchHit]:
-        dense = self.dense_hits(query) if getattr(query, "use_dense", True) else []
-        return RetrievalPipeline(self.chunks(), self.kb_version).search(query, dense_hits=dense)
+        blocks = self.chunks()
+        dense = self.dense_hits(query, blocks=blocks) if getattr(query, "use_dense", True) else []
+        return RetrievalPipeline(blocks, self.kb_version).search(query, dense_hits=dense)
+
+    def _current_vector_index(self):
+        """向量索引按**内容指纹**失效（R17-03）。
+
+        旧写法把启动时的索引当一次性快照，发布流水线重建索引后应用不重启仍返回旧向量 ——
+        这正是 S3 的 R11-07（改库后同进程不生效）在向量层的翻版。
+        """
+        items = self.store.list_kb_embeddings(self.kb_version)
+        fp = _vectors_fingerprint(items)
+        if self._vec_index is None or fp != self._vec_fp:
+            from .vector_index import VectorIndex
+            self._vec_index = VectorIndex([(cid, vec) for cid, _m, vec in items])
+            self._vec_fp = fp
+        return self._vec_index
 
     # ---- 稠密通道 ----
-    def dense_hits(self, query: SearchQuery) -> List[SearchHit]:
+    def dense_hits(self, query: SearchQuery, blocks=None) -> List[SearchHit]:
         """稠密通道命中（公开：评测脚本需单独取这一通道做对比）。"""
         emb = self.embedder
-        idx = self.vector_index
+        idx = self._current_vector_index()
         self.dense_skipped = None
-        if emb is None or idx is None or len(idx) == 0:
-            self.dense_skipped = "未配置嵌入器或向量索引为空"
+        if emb is None:
+            self.dense_skipped = "未配置嵌入器"
             return []
+        if idx is None or len(idx) == 0:
+            idx = self.vector_index      # 注入的索引作为兜底
+            if idx is None or len(idx) == 0:
+                self.dense_skipped = "未配置嵌入器或向量索引为空"
+                return []
         if not getattr(emb, "semantic", False):
             self.dense_skipped = "嵌入器不具备语义能力（semantic=False），不开启稠密通道"
             return []
@@ -79,7 +113,9 @@ class StoreRetriever:
         except Exception as exc:
             self.dense_skipped = f"查询嵌入失败：{exc}"
             return []
-        self.dense_calls += 1
+        # 计量口径（R17-11）：计**实际云端 HTTP 调用次数**，不是 embed_query 次数 ——
+        # 网络故障时会重试（默认 2 次），重试也要花钱，指数的上限会把成本基线低估到 1/3。
+        self.dense_calls = getattr(emb, "calls", self.dense_calls + 1)
         top_k = max(query.top_k * 2, 8)
         # 优先用存储层下推的近邻检索（PostgreSQL 走 pgvector + HNSW），否则用内存索引
         # 稠密通道的任何异常（维度不符 / 库里没索引 / 查询失败）都只能降级，
@@ -90,7 +126,7 @@ class StoreRetriever:
         except Exception as exc:
             self.dense_skipped = f"近邻检索失败（降级为双通道）：{exc}"
             return []
-        by_id = {c.chunk_id: c for c in self.chunks()}
+        by_id = {c.chunk_id: c for c in (blocks if blocks is not None else self.chunks())}
         hits: List[SearchHit] = []
         for cid, score in pairs:
             c = by_id.get(cid)

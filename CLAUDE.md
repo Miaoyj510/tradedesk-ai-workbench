@@ -39,20 +39,22 @@ docs/         S2-ACCEPTANCE.md、S2-AUDIT-R9.md、S3-ACCEPTANCE.md、NEXT.md（�
 
 **PRD 冲突以 PRD 为准**；实在判断不了就停下来问，不要擅自选一边。
 
-## 当前状态（2026-11-20）
+## 当前状态（2026-11-21）
 
 S1 收口 → S2 已交卷 → R9 审核（14 个根因）→ R10 全修完
-→ S3 检索层交卷（`3e86884`）→ 审核 R11（8 个根因）→ 审核 R12（3 个根因）
-→ **R12/R13 修复全部完成**（详见 `docs/S3-FIX-R13.md`）。
+→ S3 检索层交卷（`3e86884`）→ 审核 R11（8 个根因）→ R12（3 个根因）→ R14（3 个根因）
+→ **R16 把 R14 + R15 的 10 个根因全修完**（详见 `docs/S4-FIX-R16.md`）。
 
-→ **S4-4a 向量层交卷**（嵌入接口 / 向量存储 / 索引 / 余弦检索，见 `docs/S4-ACCEPTANCE.md`）。
+→ **S4-4a 向量层 → S4-4b 稠密通道接入 RRF → S4-4c 评测框架与基线** 均已交卷
+（见 `docs/S4-ACCEPTANCE.md` 第七节与 `docs/S4-EVAL-BASELINE.md`）。
 
-`dev.ps1 check` 八步：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
-→ S2 独立审核 106/106 → pytest 126 passed → S3 独立审核 → **S4 向量层 48/48**。
+`dev.ps1 check` **九步**：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
+→ S2 独立审核 106/106 → pytest 126 passed → S3 独立审核 90/90 → S4 向量层 62/62
+→ **S4 独立审核**。
 
-**审核线（`agent-b`）现状**：R14（S3 引用装配）3 个根因、R15（S4 向量层）7 个根因**都还没修**；
-`dev.ps1 audit3` 红 5 条、`dev.ps1 audit4` 红 12 条。
-下一步是修完这两轮再开 S4-4b（向量通道接入 RRF 第三通道，需要 MiniMax key）—— 看 `docs/NEXT.md`。
+**审核线（`agent-b`）现状**：**R17 审核完成**（S4-4b + S4-4c，13 个根因，**都还没修**）；
+`dev.ps1 audit4` 红 13 条（SQLite）/ 15 条（PG）。
+下一步是修完 R17 的 13 个根因（先口径 R17-05/06，再一致性 R17-01/02）—— 看 `docs/NEXT.md`。
 
 ## 常用命令
 
@@ -109,6 +111,15 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 - **`list_kb_chunks` 必须有 `ORDER BY chunk_id`**：PostgreSQL 更新一行后那行会被挤到堆尾，不排序就不能靠顺序猜块。
 - **产品必须被结构化通道确认才进草稿**：只靠词法命中的产品不许报型号与价格，
   否则"给我个最好价"会被随便挑一个产品并报价。
+- **PG 近邻检索不带 `kb_version`**（R17-01）：旧版本向量会把稠密通道挤空 ——
+  同一查询在 PG 上返回 0 条、SQLite 上返回 10 条。查索引用
+  `docker exec tradedesk-db psql -U tradedesk -d <库> -c "SELECT indexname FROM pg_indexes WHERE tablename='kb_embeddings'"`。
+- **HNSW 索引只在建表时创建**（R17-02）：存量库（4a 建的表）永远没有 ANN 索引，
+  近邻检索退化成全表扫描 —— 本机三个库实测都只有 `kb_embeddings_pkey`。
+- **`dev.ps1 eval` 每次跑 = 160 次云端查询嵌入调用**：评测脚本不看
+  `TRADEDESK_EMBEDDER_ENABLED`（那只管应用启动），跑之前先想清楚要不要花这个钱。
+- **评测的 Macro-F1 分母里有一个无样本的 `unknown`**（R17-05）：报出来的数比
+  PRD 12.3 口径低 1/6，比对门槛前先看清口径。
 
 ## 写代码的规矩
 

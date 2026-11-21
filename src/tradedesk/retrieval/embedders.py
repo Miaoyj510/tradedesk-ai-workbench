@@ -244,14 +244,18 @@ class NullEmbedder:
 
     def embed(self, texts: List[str]) -> List[List[float]]:
         from .lexical import char_ngrams
-        vec = [0.0] * self.dim
+        out: List[List[float]] = []
         for t in texts:
+            # 每条文本一个独立的累加器（R17-04）：旧写法把 vec 放在循环外，
+            # 所有文本积加到同一个器里 → 每条都返回同一条向量，余弦恒为 1，检索无从排序。
+            vec = [0.0] * self.dim
             for g in char_ngrams(t):
                 h = hashlib.blake2b(g.encode("utf-8"), digest_size=8).digest()
                 idx = int.from_bytes(h[:4], "big") % self.dim
                 sign = 1.0 if h[4] % 2 == 0 else -1.0
                 vec[idx] += sign
-        return [_normalize(vec) for _ in texts]
+            out.append(_normalize(vec))
+        return out
 
     def embed_query(self, text: str) -> List[float]:
         return self.embed([text])[0]
