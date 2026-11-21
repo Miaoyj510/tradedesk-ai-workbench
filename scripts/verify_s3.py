@@ -42,7 +42,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from tradedesk.api.app import create_app                    # noqa: E402
-from tradedesk.api.deps import AppContext                   # noqa: E402
+from tradedesk.api.deps import AppContext, offline_config                   # noqa: E402
 from tradedesk.data.kb_seed import KB_VERSION, load_kb      # noqa: E402
 from tradedesk.retrieval.base import SearchQuery           # noqa: E402
 from tradedesk.retrieval.pipeline import map_terms, TERM_TABLE  # noqa: E402
@@ -178,7 +178,7 @@ def scenario_6_country_filter(store) -> None:
 def scenario_7_citations(store) -> None:
     section("场景 7 · 引用装配与可回指")
     from fastapi.testclient import TestClient
-    app = create_app(AppContext(store=store))
+    app = create_app(AppContext(store=store, config=offline_config()))
     client = TestClient(app)
     d = client.post("/inbound", json={
         "buyer_id": "BY-S3-A", "message": "Quote 5000 pcs of X-200 FOB Shenzhen with CE certificate please.",
@@ -203,7 +203,7 @@ def scenario_8_data_from_kb(store) -> None:
     section("场景 8 · 草稿数据确实来自知识库（改库 → 草稿跟着变）")
     from tradedesk.domain.models import KBChunk
     from fastapi.testclient import TestClient
-    app = create_app(AppContext(store=store))
+    app = create_app(AppContext(store=store, config=offline_config()))
     client = TestClient(app)
     before = client.post("/inbound", json={
         "buyer_id": "BY-S3-B", "message": "Quote 100 pcs of X-300 electric pallet truck price please.",
@@ -228,7 +228,7 @@ def scenario_9_api(store) -> None:
 
     section("场景 9 · /kb/search 接口")
     from fastapi.testclient import TestClient
-    app = create_app(AppContext(store=store))
+    app = create_app(AppContext(store=store, config=offline_config()))
     client = TestClient(app)
     r = client.get("/kb/search", params={"q": "¿plazo de entrega del X-200?", "lang": "es", "country": "BR"})
     check("/kb/search 返回 200", r.status_code == 200)
@@ -249,7 +249,7 @@ def scenario_10_cert_and_country(store) -> None:
     from fastapi.testclient import TestClient
     from tradedesk.retrieval.store_retriever import StoreRetriever
 
-    app = create_app(AppContext(store=store))
+    app = create_app(AppContext(store=store, config=offline_config()))
     client = TestClient(app)
 
     def ask(buyer, country, message, lang="en"):

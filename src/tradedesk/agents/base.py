@@ -44,6 +44,9 @@ class AgentResult(BaseModel):
     confidence: float = 0.0
     notes: List[str] = Field(default_factory=list)
     next_action: str = ""
+    # 云端模型的用量（计费口径的基础）：仅在真模型路径下有值，
+    # 模板路径为 None。供成本汇总与 PRD 12.4 的单位成本指标使用。
+    llm_usage: Optional[Dict[str, Any]] = None
 
 
 class BaseAgent:

@@ -6,10 +6,13 @@
   不做：报价决策、合同、投放、任何写操作
 
 本期实现说明
-  模型层是**确定性模板 + 证据匹配**，不是真模型：
-    - 真实 LLM 生成在 S5 接入（MiniMax，能力已抽象为 LLMProvider）
-    - 真实向量检索在 S4 接入（当前证据来自 data/seed.py 的演示知识快照）
-  这样 S2 阶段可以完全离线、可重复验证，规则与证据装配逻辑也不会被推迟到 LLM 之后。
+  模型层有**两条路径**（S5-1a 起）：
+    - 模板路径（默认）：**确定性模板 + 证据匹配**，全离线可重复验证。
+    - 模型路径：真实云端模型写“话术”，而**价格 / 交期 / 数量 / 证书号不给模型看**——
+      模型只拿到占位符（例如 {{价格}}这种符号），真值由代码从结构化字段回填。
+      模型写出数字 → 判为越权 → 整段丢弃、退回模板草稿。
+  真实向量检索在 S4 接入（当前证据来自知识库块）。
+  红线：模型只能出**草稿**，报价人工签核、合同必须人工确认；不自动定价、不自动签约、不自动付款。
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ from ..domain.agentspec import AgentSpec, AgentStatus, ToolMode, ToolSpec
 from ..domain.enums import Intent, Language
 from ..domain.models import Citation, Draft
 from .base import AgentRequest, AgentResult, AgentStatus as ResultStatus, BaseAgent
+from .draft_writer import DraftRejected, ModelDraftWriter, render_facts
 
 # 询盘五类的多语关键词（对应 PRD 9.6 的重映射结果）
 # 词表是**子串匹配**（如 "late" 会命中 "late delivery"），所以词之间的包含关系会影响命中顺序。
@@ -145,9 +149,11 @@ class InquiryAgent(BaseAgent):
     没有检索器时退回旧的本地匹配（仅兜底，便于单测）。
     """
 
-    def __init__(self, retriever=None) -> None:
+    def __init__(self, retriever=None, writer=None) -> None:
         super().__init__(INQUIRY_SPEC)
         self.retriever = retriever
+        # 模型出稿执行器（S5-1a）：为 None 则只走模板路径（离线可测）。
+        self.writer = writer
 
     # ---- 证据装配 ----
     # R11-05 / R11-06：**不再有"写死常量"这条兜底路径**。
@@ -308,6 +314,26 @@ class InquiryAgent(BaseAgent):
             terms=p["terms"], port=p["port"], lead_time=p["lead_time_days"],
             cert_line=cert_line, ask_line=ASK_LINE[lang],
         )
+        # ---- S5-1a：模型路径 ----
+        # 模型只写话术，数值由代码从结构化字段回填（模型看不到真值）。
+        # 任何异常（调用失败 / 越权 / 漏占位符）都退回上面的模板正文。
+        notes: List[str] = []
+        llm_usage = None
+        model_name = "stub-template"
+        if self.writer is not None:
+            has_cert = bool(cert_line and cert_line != "—")
+            facts = self._facts(p, cert_line, lang)
+            try:
+                md = self.writer.write(lang, message,
+                                       company=str((request.context.get("customer") or {}).get("company", "") or ""),
+                                       country=country, intents=intents, with_cert=has_cert)
+                body = render_facts(md.body, facts)
+                model_name = "%s:%s" % (md.provider, md.model)
+                llm_usage = md.usage()
+                notes.append("模型出稿：%s（输入 %d / 输出 %d tokens，HTTP 调用 %d 次）"
+                             % (model_name, md.prompt_tokens, md.completion_tokens, md.calls))
+            except DraftRejected as exc:
+                notes.append("模型输出被拒（%s），退回模板草稿" % exc)
         if not country:
             next_action = "买家所在国未知：先确认目的港所在国（合规要求按目的国落地），再人工签核"
         elif needs_human:
@@ -319,13 +345,14 @@ class InquiryAgent(BaseAgent):
             intent_labels=intents, confidence=round(confidence, 2), citations=citations,
             needs_human_confirmation=needs_human,
             next_action=next_action,
-            model="stub-template",
+            model=model_name,
         )
         return AgentResult(
             agent_id=self.agent_id,
             status=ResultStatus.NEED_HUMAN if needs_human else ResultStatus.OK,
             draft=draft, intent_labels=intents, confidence=round(confidence, 2),
             evidence=[c.model_dump(mode="json") for c in citations],
+            notes=notes, llm_usage=llm_usage,
             next_action=draft.next_action,
         )
 
@@ -399,6 +426,31 @@ class InquiryAgent(BaseAgent):
             seen_ids.add(cit.citation_id)
             uniq.append(cit)
         return uniq
+
+    @staticmethod
+    def _facts(p: Dict[str, object], cert_line: str, lang: Language) -> Dict[str, str]:
+        """模型占位符 → 真实值。**真值只来自结构化字段**。
+
+        模型从来没有见过这些值 —— 它只见过占位符符号。
+        所以“模型编价格”不是靠提示须守的，而是**保证一无可编的真值**。
+        """
+        lead = str(p.get("lead_time_days", "") or "")
+        lead_unit = {Language.EN: "days", Language.ES: "días",
+                     Language.AR: "يومًا", Language.ZH: "天"}[lang]
+        per_unit = {Language.EN: "per unit", Language.ES: "por unidad",
+                    Language.AR: "للوحدة", Language.ZH: "/台"}[lang]
+        currency = str(p.get("currency", "USD") or "USD")
+        return {
+            "sku": str(p.get("sku", "") or ""),
+            "moq": str(p.get("moq", "") or ""),
+            "price_range": "%s %s–%s %s" % (currency, p.get("price_low", ""),
+                                                 p.get("price_high", ""), per_unit),
+            "terms": str(p.get("terms", "") or ""),
+            "port": str(p.get("port", "") or ""),
+            "lead_time": ("%s %s" % (lead, lead_unit)).strip(),
+            "cert_sentence": cert_line if cert_line and cert_line != "—" else "",
+            "ask_line": ASK_LINE[lang],
+        }
 
     @staticmethod
     def _clarify_body(lang: Language, intents: List[Intent]) -> str:

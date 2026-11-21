@@ -55,7 +55,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from fastapi.testclient import TestClient                      # noqa: E402
 
 from tradedesk.api.app import create_app                        # noqa: E402
-from tradedesk.api.deps import AppContext, build_registry       # noqa: E402
+from tradedesk.api.deps import AppContext, build_registry, offline_config   # noqa: E402
 from tradedesk.agents.base import AgentRequest, AgentResult     # noqa: E402
 from tradedesk.agents.inquiry import InquiryAgent               # noqa: E402
 from tradedesk.agents.registry import GROWTH_SPEC, MERCH_SPEC, Registry  # noqa: E402
@@ -161,7 +161,9 @@ def new_store(truncate: bool = False):
 
 
 def new_client(store=None, registry=None) -> TestClient:
-    return TestClient(create_app(AppContext(store=store or new_store(), registry=registry)))
+    # offline_config：审核必须可重复 —— 强制关掉模型出稿路径
+    return TestClient(create_app(AppContext(store=store or new_store(), registry=registry,
+                                            config=offline_config())))
 
 
 def close_stores() -> None:

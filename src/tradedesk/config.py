@@ -66,6 +66,12 @@ class Config:
     embedder_batch_size: int = 16
     # 默认关闭：启动时嵌入会调云端 API（计费），测试与本地运行必须开启才会发起请求。
     embedder_enabled: bool = False
+    # 模型出稿路径（S5-1a）的开关，**默认关**。
+    # 为什么不能默认开：一旦开启，每条询盘都会发起一次付费的云端调用，
+    # 而且草稿会从“确定性模板”变成“模型写的”——
+    # 审核断言与单测都会随机器人改变（不可重复），也会悄悄产生费用。
+    # 正式上线前必须显式打开，并确保人工签核链路已验证。
+    llm_draft_enabled: bool = False
     kb_version: str = KB_VERSION
     list_version: str = "sanctions-2026.11-a"
     # 业务阈值
@@ -129,6 +135,7 @@ class Config:
             embedder_dim=int(get("TRADEDESK_EMBEDDER_DIM", "0")),
             embedder_batch_size=int(get("TRADEDESK_EMBEDDER_BATCH_SIZE", "16")),
             embedder_enabled=get("TRADEDESK_EMBEDDER_ENABLED", "0") in ("1", "true", "True", "yes"),
+            llm_draft_enabled=get("TRADEDESK_LLM_DRAFT_ENABLED", "0") in ("1", "true", "True", "yes"),
             kb_version=get("TRADEDESK_KB_VERSION", KB_VERSION),
             list_version=get("TRADEDESK_LIST_VERSION", "sanctions-2026.11-a"),
             sla_first_response_s=int(get("TRADEDESK_SLA_FIRST_RESPONSE_S", "300")),

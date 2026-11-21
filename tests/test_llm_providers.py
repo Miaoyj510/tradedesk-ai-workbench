@@ -331,6 +331,38 @@ def test_chat_result_has_no_reasoning_block():
     assert "think" not in res.text.lower()
 
 
+# ---------------- 定价口径（PRD 12.4 的 ≤0.2 元/条） ----------------
+def test_pricing_table_is_sourced_and_dated():
+    """价格表必须带来源与取数日期（口径可核）。"""
+    from tradedesk.llm.pricing import AS_OF, SOURCE_URL, PRICES
+    assert SOURCE_URL.startswith("https://")
+    assert len(AS_OF) == 10
+    for p in PRICES:
+        assert p.model and p.tier and p.note
+        assert p.input_per_mtok >= 0 and p.output_per_mtok >= 0
+
+
+def test_estimate_cost_uses_official_price():
+    from tradedesk.llm.pricing import estimate_cost
+    # 官方标准档：输入 4.20 元/百万，输出 16.80 元/百万
+    cost, tier = estimate_cost("MiniMax-M3", 1_000_000, 0)
+    assert abs(cost - 4.20) < 1e-9, f"价格口径不对：{cost}"
+    cost2, _ = estimate_cost("MiniMax-M3", 0, 1_000_000)
+    assert abs(cost2 - 16.80) < 1e-9
+
+
+def test_estimate_cost_unknown_model_returns_none():
+    """没核实的模型不能猜价格 → 返回 None。"""
+    from tradedesk.llm.pricing import estimate_cost
+    assert estimate_cost("some-unknown-model", 1000, 1000) is None
+
+
+def test_pricing_range_spans_discount_and_long_context():
+    from tradedesk.llm.pricing import estimate_cost_range
+    rng = estimate_cost_range("MiniMax-M3", 1000, 1000)
+    assert rng is not None and rng[0] < rng[1]
+
+
 def test_minimax_default_model_is_not_retired():
     """MiniMax-Text-01 已下线（实测 404）——默认模型必须是当前可用的。"""
     p = get_provider("minimax")

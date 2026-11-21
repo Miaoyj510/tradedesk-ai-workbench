@@ -56,7 +56,7 @@ _setup_stdout()
 from fastapi.testclient import TestClient                      # noqa: E402
 
 from tradedesk.api.app import create_app                        # noqa: E402
-from tradedesk.api.deps import AppContext                       # noqa: E402
+from tradedesk.api.deps import AppContext, offline_config       # noqa: E402
 from tradedesk.data.kb_seed import KB_VERSION, load_kb          # noqa: E402
 from tradedesk.domain.models import KBChunk                     # noqa: E402
 from tradedesk.retrieval.base import SearchQuery                # noqa: E402
@@ -138,7 +138,9 @@ def new_store():
 
 
 def new_client(store=None) -> TestClient:
-    return TestClient(create_app(AppContext(store=store or new_store())))
+    # offline_config：审核必须可重复 —— 强制关掉模型出稿路径（不变非确定性）
+    return TestClient(create_app(AppContext(store=store or new_store(),
+                                            config=offline_config())))
 
 
 def close_stores() -> None:
@@ -438,10 +440,13 @@ def audit_6_citations() -> None:
     price_ok = bool(m) and chunk is not None and float(m.group(1)) == float(chunk.extra["price_low"])
     check("正文里的价格与命中知识块一致", price_ok,
           f"正文={m.group(0) if m else '无'} 知识块={chunk.extra.get('price_low') if chunk else '?'}")
-    lt = re.search(r"lead time of ([\d-]+) days", body)
-    lt_ok = bool(lt) and chunk is not None and str(chunk.extra["lead_time_days"]) in lt.group(1)
+    # 交期的断言做成"**正文里必须出现知识块的那个交期值**"，而不是匹配某一种词渋。
+    # 原因：正文的措辞会随草稿路径变（S5-1a 的模型路径另一种句式），
+    # “正文里有交期号”这份信息必须与引言无关，否则换一种措辞就会被误报为失败。
+    lt_value = str(chunk.extra["lead_time_days"]) if chunk is not None else ""
+    lt_ok = bool(lt_value) and lt_value in body
     check("正文里的交期与命中知识块一致", lt_ok,
-          f"正文={lt.group(0) if lt else '无'} 知识块={chunk.extra.get('lead_time_days') if chunk else '?'}")
+          f"正文含交期 {lt_value or '?'}={lt_ok} 知识块={lt_value or '?'}")
     clause("6.4")
     cm = re.search(r"certificate ([A-Z0-9-]+)", body)
     cert_in_cites = [x["citation_id"] for x in cites if x["citation_id"].startswith("CERT")]

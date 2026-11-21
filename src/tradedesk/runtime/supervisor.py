@@ -317,7 +317,11 @@ class Supervisor:
                   {"draft_id": draft_id(thread), "intent_labels": [i.value for i in result.intent_labels],
                    "confidence": result.confidence, "citations": len(draft.citations),
                    # 草稿随事件落库：进程重启后签核界面不能是空的（FR-ORC-04）
-                   "draft": draft.model_dump(mode="json")}, actor=Actor.AGENT)
+                   "draft": draft.model_dump(mode="json"),
+                   # 用模型路径（S5-1a）：哪个模型出的稿、花了多少 token / 多少次调用
+                   # —— 成本口径的基础数据必须在事件流里查得到，不能只在内存里。
+                   "model": draft.model,
+                   "llm_usage": result.llm_usage}, actor=Actor.AGENT)
 
         # 闸门评估（人工签核前）
         gates = evaluate_gates(thread, draft, self.low_confidence_threshold, self.amount_threshold)
