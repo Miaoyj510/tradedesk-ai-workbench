@@ -141,10 +141,23 @@ class GitHubAPI:
         if tree_sha in self.tree_cache:
             return tree_sha
         entries = []
-        for line in git("ls-tree", tree_sha).splitlines():
-            meta, path = line.split("\t", 1)
-            mode, _kind, sha = meta.split()
-            entries.append({"path": path, "mode": mode, "type": "blob", "sha": self.ensure_blob(sha)})
+        # ls-tree -z：路径是**原始字节**，不带 C 风格转义。
+        # 旧写法用普通 ls-tree，中文文件名会被转义成 "PRD-\345\244\236..."，
+        # 当成字面路径发出去 → 远端存的字节与本地不同 → 树 SHA 永远对不上。
+        raw_tree = git_bytes("ls-tree", "-z", tree_sha)
+        for rec in raw_tree.split(b"\x00"):
+            if not rec:
+                continue
+            meta, _, path_b = rec.partition(b"\t")
+            mode, kind, sha = meta.decode("utf-8").split()
+            path = path_b.decode("utf-8")
+            # 子目录是 **tree** 对象**，不是 blob** —— 当成 blob 读会报 "bad file"。
+            if kind == "tree":
+                entries.append({"path": path, "mode": mode, "type": "tree",
+                                "sha": self.ensure_tree(sha)})
+            else:
+                entries.append({"path": path, "mode": mode, "type": "blob",
+                                "sha": self.ensure_blob(sha)})
         out = self._req("POST", f"/repos/{self.owner}/{self.repo}/git/trees", {"tree": entries})
         got = out["sha"]
         if got != tree_sha:
