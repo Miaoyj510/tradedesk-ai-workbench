@@ -98,9 +98,14 @@ def test_example_template_vars_are_all_readable():
 
     import tradedesk.config as cfgmod
     source = Path(cfgmod.__file__).read_text(encoding="utf-8")
+    # 厂商专用的 key / base_url 变量名由厂商表统一管理（见 llm/providers.py），
+    # 不在 config.py 里写死；新增厂商时这里自动跳过，不用再手动补免费列表。
+    from tradedesk.llm.providers import PROVIDERS
+    vendor_envs = {pv.api_key_env for pv in PROVIDERS.values()}
+    vendor_envs |= {pv.base_url_env for pv in PROVIDERS.values() if pv.base_url_env}
     for name in declared:
-        if name in ("MINIMAX_API_KEY", "MINIMAX_BASE_URL"):
-            continue  # 这两个由 LLM 提供方规定，不走 TRADEDESK_ 前缀
+        if name in vendor_envs:
+            continue
         assert name in source, f"{name} 写在 .env.example 里，但配置里没有读"
 
 

@@ -183,12 +183,12 @@ def main() -> int:
         embedder = None
         try:
             from tradedesk.config import get_settings
-            from tradedesk.retrieval.embedders import RemoteEmbedder
+            from tradedesk.llm.factory import build_embedder
             cfg = get_settings()
-            if cfg.llm_api_key:
-                embedder = RemoteEmbedder(base_url=cfg.embedder_base_url, api_key=cfg.llm_api_key,
-                                         model=cfg.embedding_model, dim=cfg.embedding_dim,
-                                         timeout_s=cfg.llm_timeout_s)
+            # 走工厂：评测脚本也应该能切换厂商，不能只能测 MiniMax。
+            embedder = build_embedder(cfg)
+            if embedder is None:
+                print("[提示] 嵌入器未生效（没配厂商的 key，或选了不提供嵌入接口的厂商）")
         except Exception as exc:
             print(f"[提示] 嵌入器初始化失败：{exc}")
         idx = load_index(store, KB_VERSION)

@@ -40,13 +40,10 @@ class AppContext:
         cfg = self.config
         if not getattr(cfg, "embedder_enabled", False):
             return None
-        if not cfg.llm_api_key:
-            return None
-        from ..retrieval.embedders import RemoteEmbedder
-        return RemoteEmbedder(base_url=cfg.embedder_base_url, api_key=cfg.llm_api_key,
-                              model=cfg.embedding_model, dim=cfg.embedding_dim,
-                              timeout_s=cfg.llm_timeout_s, batch_size=cfg.embedder_batch_size,
-                              provider=cfg.embedder_provider)
+        # key 的判定交给工厂：厂商各自的环境变量名不同，
+        # 在这里写死 "cfg.llm_api_key" 会把“配了 MiniMax 但用阿里云”的情况误判成“没 key”。
+        from ..llm.factory import build_embedder
+        return build_embedder(cfg)
 
     def __init__(self, store: StateStore, registry: Optional[Registry] = None,
                  config: Optional[Config] = None) -> None:

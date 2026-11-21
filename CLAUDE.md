@@ -121,6 +121,22 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 - **评测的 Macro-F1 分母里有一个无样本的 `unknown`**（R17-05）：报出来的数比
   PRD 12.3 口径低 1/6，比对门槛前先看清口径。
 
+- **厂商表在 `src/tradedesk/llm/providers.py`**：换厂商 = 改表里一行 + 改一个 env，业务代码不动。
+  基址地址**按厂商分开**（每家各有 `base_url_env`），不会拿 MiniMax 的地址去请求阿里云。
+- **`MiniMax-Text-01` 已下线**（实测 HTTP 404 "no longer available"），`MiniMax-M2` 也一样返回 404 ——
+  **`/v1/models` 列表不等于可用**。当前可用：`MiniMax-M3` / `MiniMax-M3.1-Flash`（默认已改 M3）。
+- **MiniMax-M3 把思考过程写在 `message.content` 里**（`<think>...</think>`）——
+  不剔就会把内部推理对外发给买家。剔除做在**解析层**（`chat.py` 的 `strip_reasoning`）。
+- **HTTP 4xx 是业务错误，不是网络故障**：`urllib.error.HTTPError` 是 `URLError` 的子类，
+  一律当网络错误处理就会把 401 重试三次（每次都计费），且报错指向错的方向。
+  必须单独捕获 `HTTPError` 并转成业务错误。
+- **MiniMax 与其余厂商的嵌入请求体不同**：MiniMax 是 `{"model","texts":[...],"type":"db|query"}` → `vectors`；
+  其余是 OpenAI 兼容 `{"model","input":[...]}` → `data[].embedding`。两种形态各有一个客户端实现。
+- **pytest 的 basetemp 固定在项目内 `.pytest_tmp`**：系统 `TEMP` 里的 `pytest-of-<user>` 目录可能被其他账号的 ACL 限制，
+  pytest 创建 basetemp 时会直接 `PermissionError`，测试全部报错（不是代码的错）。
+- **`.env` 里各厂商专用的 key 变量名由厂商表统一管**（不写死在 `config.py`）；
+  项目自己的 `.env` 解析器**不支持行内注释**（取右侧整个当值），注释必须单独占一行。
+
 ## 写代码的规矩
 
 - 中文注释解释**为什么**，不解释**做了什么**。

@@ -275,8 +275,13 @@ def audit_s2_client() -> None:
         emb6.embed(["a"])
     except EmbeddingError:
         pass
-    note("HTTP 401/403 会被当成网络错误重试（业务错误不重试的承诺只对 MiniMax 形态成立）",
-         f"HTTPError ⊂ URLError → 401 也重试，共 {len(t6.calls)} 次调用")
+    # S5 已修（见 docs/S5-ACCEPTANCE.md 第五节）：HTTP 401/403 是**业务错误**（鉴权失败 / 模型名错 / 参数错），
+    # 不是网络故障，不得重试：令牌都要花，重试三次就是花三次钱；
+    # 且报错指向“网络”会把排查引到错的方向。
+    # 这条原来是“记账项”（不违约但要记），限制已消失 → 升为活断言。
+    check("HTTP 401/403 必须算业务错误、不得重试（S5 已修）",
+          len(t6.calls) == 1,
+          f"HTTPError ⊂ URLError；若当网络错误则 401 也重试。实测调用次数={len(t6.calls)}（应为 1）")
     clause("S15-10")
     err = EmbeddingError("boom")
     check("异常信息里不得出现 API key", "K" not in str(err), "")
