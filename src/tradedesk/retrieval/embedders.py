@@ -61,6 +61,20 @@ def _urllib_transport(url: str, headers: dict, payload: dict, timeout: int) -> d
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _http_error(exc: "urllib.error.HTTPError") -> EmbeddingError:
+    """HTTP 4xx/5xx = **业务错误**（鉴权失败、参数错、模型名错），不是网络故障。
+
+    为什么必须区分：`urllib.error.HTTPError` 是 `URLError` 的子类，
+    如果一律当网络错误处理，会把 401 重试三次（每次都计费）
+    并且报错会说“调用失败”而不是“鉴权失败”——排查时会被引导到错的方向。
+    """
+    try:
+        body = exc.read().decode("utf-8", "replace")[:300]
+    except Exception:                      # pragma: no cover - 读体失败不能盖掉原错误
+        body = ""
+    return EmbeddingError(f"嵌入 API 返回 HTTP {exc.code}：{body}")
+
+
 class RemoteEmbedder:
     """云端嵌入客户端（MiniMax 主流，也支持 OpenAI 兼容形态）。
 
@@ -155,6 +169,8 @@ class RemoteEmbedder:
                 return self._parse(resp)
             except EmbeddingError:
                 raise                       # 业务错误（如 key 无效）不重试
+            except urllib.error.HTTPError as exc:
+                raise _http_error(exc)       # HTTP 4xx/5xx = 业务错误，不重试
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
                 last_err = exc
                 if attempt < self.retries:
@@ -259,3 +275,94 @@ class NullEmbedder:
 
     def embed_query(self, text: str) -> List[float]:
         return self.embed([text])[0]
+
+
+class OpenAICompatibleEmbedder:
+    """OpenAI 兼容形态的嵌入客户端（阿里云百炼 / 智谱 / 火山方舟等）。
+
+    与 MiniMax 的自定义形态（texts + type）不同，这里用 OpenAI 的 `{"model", "input": [...]}` 与 `data[].embedding`。
+    """
+
+    name = "openai-compatible"
+    semantic = True
+
+    def __init__(self, provider=None, api_key: str = "", base_url: str = "", model: str = "",
+                 dim: int = 1024, timeout_s: int = 30, retries: int = 2,
+                 batch_size: int = 16, transport=None) -> None:
+        self.provider = provider
+        self.api_key = api_key
+        self.base_url = (base_url or (provider.embedding_base_url if provider else "")).rstrip("/")
+        self.model = model or (provider.embedding_model if provider else "")
+        self.dim = dim
+        self.timeout_s = timeout_s
+        self.retries = max(0, retries)
+        self.batch_size = max(1, batch_size)
+        self._transport = transport or _urllib_transport
+        self.calls = 0
+
+    def _url(self) -> str:
+        path = self.provider.embedding_path if self.provider else "/v1/embeddings"
+        return f"{self.base_url}{path}"
+
+    def _payload(self, texts: List[str]) -> dict:
+        return {"model": self.model, "input": texts}
+
+    def _parse(self, resp: dict) -> List[List[float]]:
+        if not isinstance(resp, dict):
+            raise EmbeddingError(f"嵌入 API 返回不是 JSON 对象：{str(resp)[:120]}")
+        base = resp.get("base_resp") or {}
+        code = base.get("status_code")
+        if code not in (None, 0):
+            raise EmbeddingError(f"嵌入 API 报错：{code} {base.get('status_msg', '')}")
+        data = resp.get("data")
+        if not isinstance(data, list) or not data:
+            raise EmbeddingError(f"嵌入 API 响应里没有向量：{str(resp)[:160]}")
+        out = []
+        for item in data:
+            vec = item.get("embedding") if isinstance(item, dict) else None
+            if not isinstance(vec, list):
+                raise EmbeddingError(f"嵌入 API 向量格式不对：{str(item)[:120]}")
+            out.append([float(x) for x in vec])
+        return out
+
+    def _post(self, texts: List[str]) -> List[List[float]]:
+        url = self._url()
+        payload = self._payload(texts)
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        last: Optional[Exception] = None
+        for attempt in range(self.retries + 1):
+            try:
+                self.calls += 1
+                return self._parse(self._transport(url, headers, payload, self.timeout_s))
+            except EmbeddingError:
+                raise
+            except urllib.error.HTTPError as exc:
+                raise _http_error(exc)       # HTTP 4xx/5xx = 业务错误，不重试
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                last = exc
+                if attempt < self.retries:
+                    time.sleep(0.4 * (attempt + 1))
+        raise EmbeddingError(f"嵌入 API 调用失败（已重试 {self.retries} 次）：{last}")
+
+    def embed(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        out: List[List[float]] = []
+        for i in range(0, len(texts), self.batch_size):
+            batch = texts[i:i + self.batch_size]
+            vecs = self._post(batch)
+            if len(vecs) != len(batch):
+                raise EmbeddingError(f"嵌入数量不匹配：请求 {len(batch)} 条，返回 {len(vecs)} 条")
+            for v in vecs:
+                if len(v) != self.dim:
+                    raise EmbeddingError(f"嵌入维度与预期不符：预期 {self.dim}，实际 {len(v)}")
+                out.append(_normalize(v))
+        return out
+
+    def embed_query(self, text: str) -> List[float]:
+        vecs = self._post([text])
+        if not vecs:
+            raise EmbeddingError("嵌入 API 没有返回查询向量")
+        if len(vecs[0]) != self.dim:
+            raise EmbeddingError(f"嵌入维度与预期不符：预期 {self.dim}，实际 {len(vecs[0])}")
+        return _normalize(vecs[0])

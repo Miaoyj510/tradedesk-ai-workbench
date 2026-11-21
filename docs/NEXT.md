@@ -27,29 +27,43 @@
 | **S4-4c（语义召回评测与回归）** | ✅ 交卷：评测框架 + **自建语料 160 条（缩减版）** + 实测基线（`docs/S4-EVAL-BASELINE.md`）；当正业语种 en/es/ar |
 | **S4 审核 R17** | ✅ 核验完成（分支 `agent-b`）：断言 78 项（SQLite）/ 85 项（PG），**13 FAIL → 13 个根因**（见 `docs/S4-AUDIT-R17.md`）—— **⚠️ 全部未修** |
 | S4-4c 续（语料扩量 / ar-es 语料返工 / 公开基准体检层 / BGE-M3 对照） | ⬜ 待办（语料需人力；基准层因 huggingface 不可达；**编号见 R17-08：不得撞 PRD 14.3 的 V-xx**） |
-| S5（接 MiniMax 真模型草稿 + 成本采量） | ⬜ 未开始 |
-
-| S5（接 MiniMax 真模型 + 成本计量） | ⬜ 未开始 |
+| **S5（多云厂商 provider 层）** | ✅ 交卷（`agent-a`）：5 家厂商注册表 + 对话/嵌入客户端 + 工厂；见 `docs/S5-ACCEPTANCE.md` |
+| S5 续（真模型出草稿 + 成本计量落库 + 人工签核闸门联动） | ⬜ 未开始（**红线不变**：报价人工签核、合同必须人工确认） |
 | S6（前端联调 + 镜像 + 灰度回滚） | ⬜ 未开始 |
 
 `dev.ps1 check` 现在是**九步**：语法 → S1 双后端 53/53 → S2 自证 97/97 →
-S3 自证 52/52 → S2 独立审核 106/106 → pytest 126 passed → S3 独立审核 90/90 → S4 向量层 60/60（PG 62/62）→ **S4 独立审核**。
+S3 自证 52/52 → S2 独立审核 106/106 → pytest 173 passed → S3 独立审核 90/90 → S4 向量层 60/60（PG 62/62）→ **S4 独立审核**。
 （第七步 S3 独立审核、**第九步 S4 独立审核**都已在 `check` 里，是**交付门禁**。）
 
-**当前状态：前八步全绿，第九步（audit4）红 13 条（SQLite）/ 15 条（PG）** ——
-红的正是 **R17 的 13 个根因**（R17-01~13，见 `docs/S4-AUDIT-R17.md`）：
-跨后端不一致（PG 近邻检索不按库版本过滤 / 存量库没有 ANN 索引）、
-向量在进程内不失效、`NullEmbedder` 多文本同向量、
-以及 **4c 的指标口径**（Macro-F1 分母含无样本标签、稠密通道失败与召回差不可区分、
-待验证项撞号、ar/es 语料含破损句、基线"90% 点名型号"与实际不符）。
+**当前状态：九步全绿**。R17 的 13 个根因已由 **R18** 全部修完（`e002015`，已合入 `main @ 16472bc`），
+S5 的多厂商改造也已通过九步门禁。
 
-审核线在 `agent-b` 上（已快进到 `main @ a0221c9`）。**
-R17 修完后 `check` 才全绿。
+分支现状：`main` = `16472bc`（R18 已合入），`agent-a` = `e002015` + S5 改造（本轮，未提交），
+`agent-b` = `b853be1`（R17 审核线）。
 
-分支现状：`main` = `a0221c9`（已合并 S4-4b / S4-4c），`agent-a` = `e1cace3`（S4-4c），
-`agent-b` = R17 审核线（本轮提交）。
+## 二、S5（本次）：多云厂商 provider 层
 
-## 二、下一步：修完 R17 的 13 个根因
+**目标：把“厂商”从代码里拆出来，变成表里的一行。**业务代码不知道用的是哪家。
+
+| 厂商 | 对话 | 嵌入 | 状态 |
+| --- | --- | --- | --- |
+| MiniMax | `api.minimaxi.com` | `embo-01`（1536 维，实测） | ✅ 真实对话 + 嵌入均已跑通 |
+| 阿里云百炼（通义千问） | `dashscope.aliyuncs.com/compatible-mode` | `text-embedding-v3` | ✅ 端点实测可达（维度待核实） |
+| 智谱 GLM | `open.bigmodel.cn/api/paas/v4` | `embedding-3` | ✅ 端点实测可达（维度待核实） |
+| 火山方舟（豆包） | `ark.cn-beijing.volces.com/api/v3` | `doubao-embedding` | ✅ 端点实测可达（维度待核实） |
+| DeepSeek | `api.deepseek.com` | **无嵌入接口** | ✅ 只能做对话 |
+
+关键设计：
+
+- **切换厂商 = 改一行 `TRADEDESK_LLM_PROVIDER` + 填一个 key**，业务代码不动（厂商表在 `src/tradedesk/llm/providers.py`）。
+- **基址地址按厂商分开**：不会把 MiniMax 的地址拿去请求阿里云。
+- **两种嵌入请求体分开处理**：MiniMax 是自定义 `texts/type`，其余是 OpenAI 兼容 `input` / `data[].embedding`。
+- **HTTP 4xx 是业务错误（不重试）**：修了 S15-09 这条记账项，并把它从“记账项”升为**活断言**（只加强，未删减任何断言）。
+- **思考块剔除**：MiniMax-M3 把思考写在 `message.content` 里，不剔就会把内部推理对外发。
+
+完整验收基线见 **`docs/S5-ACCEPTANCE.md`**（含厂商矩阵、成本口径、待验证项 S5-V1~V6）。
+
+## 三、下一步：修完 R17 的 13 个根因
 
 ### 2.1 R11 八个根因的现状（R14 复核 `main @ 844180a`，`scripts/audit_s3.py` 实测）
 
@@ -130,7 +144,7 @@ R17 修完后 `check` 才全绿。
 > 而是**报出来的数字与跑出来的行为比预期的弱一点**。
 > 处理顺序建议：**先口径（R17-05/06）→ 再一致性（R17-01/02）→ 其余同一轮收**。
 
-## 三、S4 真实向量检索
+## 四、S4 真实向量检索
 
 S3 只是**词法（BM25）+ 结构化（型号/证书号/HS 精确匹配）**双通道，稠密通道是占位实现。
 S4 才把"多语种语义召回"变成真的，验收基线见 PRD 第 9 章与第 12 章。
@@ -150,13 +164,14 @@ S4 才把"多语种语义召回"变成真的，验收基线见 PRD 第 9 章与�
 ⚠ 模型口径：本机无 GPU 且 Docker Hub 不可达，嵌入走**云端 API（MiniMax embo-01）**而不是 PRD 原定的本地 BGE-M3；
 pgvector 镜像已本地构建好（`docker/pgvector/Dockerfile`，compose 已切换）。详见 `docs/S4-ACCEPTANCE.md` 第二节。
 
-## 四、每片子的验收动作
+## 五、每片子的验收动作
 
 ```powershell
 $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 & $dev check -Dsn "postgresql://tradedesk:tradedesk_local_dev@127.0.0.1:5433/tradedesk_a"  # 实现 agent
 & $dev audit                                                                          # S2 独立审核
 & $dev audit3                                                                         # S3 独立审核
+& "D:\桌面\AIagent_project\外贸项目\.venv\Scripts\python.exe" -m pytest tests/test_llm_providers.py -q   # S5 厂商层（离线，不联网）
 ```
 
 审核脚本双后端跑法（脚本自建独立库并回收，**不要**指向 `tradedesk_a` / `tradedesk_b`）：
@@ -168,7 +183,7 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 & $dev audit3 -Dsn "postgresql://tradedesk:tradedesk_local_dev@127.0.0.1:5433/tradedesk_audit_b"
 ```
 
-## 五、别忘了合并
+## 六、别忘了合并
 
 合并路径固定为 `agent-b` → `agent-a` → `main`，每次合并后在集成区重跑一次 `check`。
 S3 已走完这条路径：`agent-a`(`3e86884`) → `main`(`e9b8278`)，三线远端 SHA 已核对一致；
@@ -180,14 +195,14 @@ R11 审核线已合入 `main`(`8a8d8a7`)。
 按流程走 `agent-b` → `agent-a`（实现 agent 先修完 R17-01~13）→ `main`。
 R14 与 R15 的根因已在 R16 修完，`check` 第七步是绿的。
 
-## 六、几个已知的坑
+## 七、几个已知的坑
 
 见根目录 `CLAUDE.md` 的"本项目特有的坑"一节（枚举 `str()`、SQLite 跨线程、
 闸门令牌绑定、`dev.ps1` 的 BOM、控制台 GBK、PostgreSQL 审核库）。
 
 **2026-11-20：PostgreSQL 容器一度没运行**（`127.0.0.1:5433` 连接超时，pytest 7 个
 PG 用例被 skip）。**容器已恢复**：R14 审核时 SQLite 87 项 / PostgreSQL 90 项都跑过了，
-双后端比对（§10）4 组查询结果逐条一致，pytest 126 passed 无 skip。
+双后端比对（§10）4 组查询结果逐条一致，pytest 173 passed 无 skip。
 双跑命令：`& $dev audit3 -Dsn "postgresql://tradedesk:tradedesk_local_dev@127.0.0.1:5433/tradedesk_audit_b"`。
 
 **2026-11-21（R17 新增）**：

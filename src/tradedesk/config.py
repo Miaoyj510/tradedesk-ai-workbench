@@ -42,9 +42,12 @@ class Config:
     redis_url: str = ""
     # 大模型（云 API Key 方式；S1 阶段不调用，仅登记配置）
     llm_provider: str = "minimax"
-    llm_model: str = "MiniMax-Text-01"
+    llm_model: str = ""              # 留空 = 用厂商默认模型（换厂商时不要遗留上一家的模型名）
     llm_api_key: str = ""
+    # 通用基址地址覆盖（留空 = 用厂商表里的默认地址）
     llm_base_url: str = ""
+    # 各厂商各自的基址地址（从环境变量读，键名见 providers.Provider.base_url_env）
+    provider_base_urls: Dict[str, str] = field(default_factory=dict)
     llm_timeout_s: int = 30
     # 检索
     # 体前实际使用的嵌入模型。PRD 原定 BGE-M3（本地部署），但本机无可用 GPU
@@ -55,8 +58,11 @@ class Config:
     # 维度错会在嵌入客户端直接报错，也会让 pgvector 列拒绝写入 —— 两道关都能拦下来。
     embedding_dim: int = 1536
     reranker_model: str = "bge-reranker-v2-m3"
+    # 嵌入厂商（可在 minimax / aliyun / zhipu / volcengine 之间切换，见 llm/providers.py）
     embedder_provider: str = "minimax"
-    embedder_base_url: str = "https://api.minimaxi.com"
+    embedder_base_url: str = ""          # 留空 = 用厂商默认地址
+    embedder_model: str = ""             # 留空 = 用厂商默认模型（否则用 embedding_model）
+    embedder_dim: int = 0               # 0 = 用厂商默认维度
     embedder_batch_size: int = 16
     # 默认关闭：启动时嵌入会调云端 API（计费），测试与本地运行必须开启才会发起请求。
     embedder_enabled: bool = False
@@ -85,20 +91,42 @@ class Config:
         def get(key: str, default: str = "") -> str:
             return os.environ.get(key) or dotenv.get(key, default)
 
+        # 厂商专用的 key / base_url 也要能从 .env 里读到。
+        # 之前只映射了 MINIMAX_API_KEY，所以在 .env 里填 DASHSCOPE_API_KEY 是沉沉无声的。
+        from .llm.providers import PROVIDERS, get_provider
+
+        def _vendor_env(provider, attr: str) -> str:
+            env_name = getattr(provider, attr, "") if provider else ""
+            return get(env_name, "") if env_name else ""
+
+        try:
+            _provider = get_provider(get("TRADEDESK_LLM_PROVIDER", "minimax"))
+        except KeyError:
+            _provider = None
+
         cfg = cls(
             db_path=get("TRADEDESK_DB_PATH", "data/tradedesk.db"),
             database_url=get("TRADEDESK_DATABASE_URL", ""),
             redis_url=get("TRADEDESK_REDIS_URL", ""),
             llm_provider=get("TRADEDESK_LLM_PROVIDER", "minimax"),
-            llm_model=get("TRADEDESK_LLM_MODEL", "MiniMax-Text-01"),
-            llm_api_key=get("MINIMAX_API_KEY", ""),
-            llm_base_url=get("MINIMAX_BASE_URL", ""),
+            llm_model=get("TRADEDESK_LLM_MODEL", ""),
+            # 通用变量优先；旧的 MiniMax 变量保留作兼容（不破坏已有的本地 .env）。
+            llm_api_key=(get("TRADEDESK_LLM_API_KEY", "")
+                         or _vendor_env(_provider, "api_key_env")
+                         or get("MINIMAX_API_KEY", "")),
+            # 基址地址**不能再回退到 MINIMAX_BASE_URL**：那样一切到阿里云就会拿 MiniMax 的地址。
+            # 厂商专用的基址地址走 provider_base_urls，由工厂按厂商取。
+            llm_base_url=get("TRADEDESK_LLM_BASE_URL", ""),
+            provider_base_urls={pk: get(pv.base_url_env, "")
+                                for pk, pv in PROVIDERS.items() if pv.base_url_env},
             llm_timeout_s=int(get("TRADEDESK_LLM_TIMEOUT_S", "30")),
             embedding_model=get("TRADEDESK_EMBEDDING_MODEL", "embo-01"),
             embedding_dim=int(get("TRADEDESK_EMBEDDING_DIM", "1536")),
             reranker_model=get("TRADEDESK_RERANKER_MODEL", "bge-reranker-v2-m3"),
             embedder_provider=get("TRADEDESK_EMBEDDER_PROVIDER", "minimax"),
-            embedder_base_url=get("MINIMAX_BASE_URL", "") or "https://api.minimaxi.com",
+            embedder_base_url=get("TRADEDESK_EMBEDDER_BASE_URL", ""),
+            embedder_model=get("TRADEDESK_EMBEDDER_MODEL", ""),
+            embedder_dim=int(get("TRADEDESK_EMBEDDER_DIM", "0")),
             embedder_batch_size=int(get("TRADEDESK_EMBEDDER_BATCH_SIZE", "16")),
             embedder_enabled=get("TRADEDESK_EMBEDDER_ENABLED", "0") in ("1", "true", "True", "yes"),
             kb_version=get("TRADEDESK_KB_VERSION", KB_VERSION),
