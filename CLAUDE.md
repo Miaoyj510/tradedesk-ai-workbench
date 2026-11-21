@@ -134,6 +134,16 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
   其余是 OpenAI 兼容 `{"model","input":[...]}` → `data[].embedding`。两种形态各有一个客户端实现。
 - **pytest 的 basetemp 固定在项目内 `.pytest_tmp`**：系统 `TEMP` 里的 `pytest-of-<user>` 目录可能被其他账号的 ACL 限制，
   pytest 创建 basetemp 时会直接 `PermissionError`，测试全部报错（不是代码的错）。
+- **模型出稿的开关默认关**（`TRADEDESK_LLM_DRAFT_ENABLED=0`）：开启后每条询盘都会发起一次**付费**云端调用，
+  且草稿会从“确定性模板”变成“模型写的”——**审核断言会随机器人变动**（不可重复）。
+  审核 / 验证脚本必须用 `deps.offline_config()` 强制关掉它。
+  此事已实测踩过：第一次接线后 `dev.ps1 check` 的 pytest 从 6 秒涨到 48 秒 ——
+  审核脚本经 `AppContext` 构造 Agent 时自动拿到了云端客户端，真的调了云端。
+- **模型出草的数值不能给模型看**：模型只拿到 `{{价格}}` 这种占位符，真值由代码从结构化字段回填。
+  这不是提示词是否加强的问题 —— 拒绝依赖模型配合度。断言在
+  `tests/test_draft_writer.py::test_model_never_sees_the_real_price`。
+- **买家消息的数据区用随机后缀标签**：`</buyer_message>` 是写死的，买家能提前关区把指令塞进去。
+- **价格表只在 `src/tradedesk/llm/pricing.py` 里维护**，必须带来源与取数日期；模型不在表里就返回 None（不猜、不估算）。
 - **`.env` 里各厂商专用的 key 变量名由厂商表统一管**（不写死在 `config.py`）；
   项目自己的 `.env` 解析器**不支持行内注释**（取右侧整个当值），注释必须单独占一行。
 

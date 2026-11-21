@@ -532,7 +532,9 @@ def main() -> int:
     print("提示：Inquiry 的草稿是确定性模板（S5 接真模型）；名单为结构化演示数据（非真实名单）")
 
     store = SqliteStateStore(str(db_path))
-    client = TestClient(create_app(AppContext(store=store)))
+    # offline_config：验证脚本不超发云端调用（也不产生费用）
+    from tradedesk.api.deps import offline_config
+    client = TestClient(create_app(AppContext(store=store, config=offline_config())))
     try:
         scenario_1_health_and_agents(client)
         scenario_2_routing_and_draft(client)

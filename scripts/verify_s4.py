@@ -370,7 +370,8 @@ def scenario_8_agent_dense(store) -> None:
     index_kb(store, HashEmbedder(dim=_dim), KB_VERSION, chunks=blocks)
     idx = load_index(store, KB_VERSION)
 
-    ctx = AppContext(store=store)
+    from tradedesk.api.deps import offline_config
+    ctx = AppContext(store=store, config=offline_config())
     emb = CountingSemanticEmbedder(dim=_dim)
     ctx.embedder = emb
     ctx.vector_index = idx

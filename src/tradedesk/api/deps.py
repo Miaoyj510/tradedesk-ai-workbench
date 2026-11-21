@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import Header, HTTPException, Request
 
 from ..agents.inquiry import InquiryAgent
+from ..agents.draft_writer import ModelDraftWriter
 from ..data.kb_seed import KB_VERSION, load_kb
 from ..agents.registry import MERCH_SPEC, GROWTH_SPEC, Registry
 from ..agents.sentinel import SentinelAgent
@@ -22,10 +23,15 @@ from ..store.base import StateStore
 from ..store.sqlite_store import SqliteStateStore
 
 
-def build_registry(retriever=None) -> Registry:
-    """注册本期两个实现型角色 + 两个仅声明型角色。"""
+def build_registry(retriever=None, chat=None) -> Registry:
+    """注册本期两个实现型角色 + 两个仅声明型角色。
+
+    `chat` 为云端对话客户端（S5-1a）：为 None 时 Eva 只走模板路径（离线可测）；
+    有了它才走真模型出稿。**两条路径都不自动发送**（写操作与发送分离）。
+    """
     reg = Registry()
-    reg.register(InquiryAgent(retriever=retriever))
+    reg.register(InquiryAgent(retriever=retriever,
+                              writer=ModelDraftWriter(chat) if chat is not None else None))
     reg.register(SentinelAgent())
     reg.register_spec(MERCH_SPEC)
     reg.register_spec(GROWTH_SPEC)
@@ -34,6 +40,19 @@ def build_registry(retriever=None) -> Registry:
 
 class AppContext:
     """把依赖装到一个对象里，测试时方便替换。"""
+
+    def _build_chat(self):
+        """按配置建云端对话客户端（S5-1a）；没配厂商或没 key 就返回 None。
+
+        **还要求 `TRADEDESK_LLM_DRAFT_ENABLED=1`**（默认关）——否则 Eva 只走模板路径。
+        为什么要一个开关：开启后每条询盘都会发起一次**付费**的云端调用，
+        且草稿从“确定性模板”变成“模型写的”——审核断言与单测都会随机器人改变，
+        也会悄悄产生费用。默认关是安全侧，上线时显式打开。
+        """
+        if not getattr(self.config, "llm_draft_enabled", False):
+            return None
+        from ..llm.factory import build_chat_client
+        return build_chat_client(self.config)
 
     def _build_embedder(self):
         """按配置建嵌入器；未开启或没有 key 就返回 None。"""
@@ -82,7 +101,16 @@ class AppContext:
         # 检索器在嵌入器与向量索引就绪后创建：稠密通道才能接上去（S4-4b）。
         self.retriever = StoreRetriever(self.store, self.kb_version,
                                         embedder=self.embedder, vector_index=self.vector_index)
-        self.registry = registry or build_registry(retriever=self.retriever)
+        # 云端对话客户端（S5-1a）：没 key 时为 None → Eva 自动退回模板路径。
+        self.chat = self._build_chat()
+        if self.chat is not None:
+            print(f"[deps] 云端模型已接入：{self.chat.provider.name} / {self.chat.model}"
+                  "（Eva 将走模型出稿路径；草稿仍需人工签核）")
+        elif not getattr(self.config, "llm_draft_enabled", False):
+            print("[deps] 模型出稿未开启（TRADEDESK_LLM_DRAFT_ENABLED=0）：Eva 只走模板路径")
+        else:
+            print("[deps] 未配云端模型 key（或厂商未配置）：Eva 只走模板路径")
+        self.registry = registry or build_registry(retriever=self.retriever, chat=self.chat)
         self.tokens = GateTokenService(store, ttl_seconds=self.config.gate_token_ttl_s)
         self.supervisor = Supervisor(
             store=store, registry=self.registry, token_service=self.tokens,
@@ -93,6 +121,20 @@ class AppContext:
             sla_quote=self.config.sla_quote_s,
             sla_followup=self.config.sla_followup_s,
         )
+
+
+def offline_config(cfg: Optional[Config] = None) -> Config:
+    """返回一份**强制关掉云端对话**的配置副本（审核 / 验证脚本用）。
+
+    为什么需要：模型出稿路径由 `TRADEDESK_LLM_DRAFT_ENABLED` 控制，而这个开关在 .env 里。
+    如果审核脚本直接用环境配置，那么本机一旦开了开关，审核断言就会随模型输出变动
+    （且会真的产生费用）——审核必须是**可重复**的，所以在这里强制关掉。
+    只关对话出稿，**不动嵌入**（audit_s4 需要嵌入通道，否则它自己会开它）。
+    """
+    import copy
+    c = copy.deepcopy(cfg) if cfg is not None else copy.deepcopy(get_settings())
+    c.llm_draft_enabled = False
+    return c
 
 
 def get_context() -> AppContext:
