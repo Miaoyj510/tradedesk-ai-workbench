@@ -202,6 +202,11 @@ def _structured_hits(chunks: List[KBChunk], query: SearchQuery) -> List[SearchHi
     return hits
 
 
+# RRF 参数：越小越优先。结构化（精确命中型号/证书号）最优先；词法次之；
+# 稠密最低 —— 它只是召回辅助（实测：向量分不清型号）。
+RRF_K = {"lexical": 60, "structured": 10, "dense": 100}
+
+
 def _identity_key(chunk: KBChunk) -> str:
     """去重用的身份键：同一型号的多语版本算同一条，但规格记录单独计。"""
     sku = chunk.identifiers.get("sku")
@@ -305,6 +310,48 @@ class RetrievalPipeline:
                 "structured": _structured_hits(scope, query)}
 
     # ---- 主流程
+    def search_by_channel(self, query: SearchQuery,
+                          dense_hits: Optional[List[SearchHit]] = None) -> Dict[str, List[SearchHit]]:
+        """按通道分开返回命中（评测用：分通道看各自能力）。
+
+        三个通道：词法 / 结构化 / 稠密。过期块在这里就丢弃（不参与融合）。
+        """
+        today = query.today or date.today()
+        concepts, tokens = self.enrich(query.text)
+        kept, dropped = self.filter(query)
+        # 属性过滤是**硬约束**（R11-01 / R11-02）：过期、别国、HS 不对的块都不参与召回；
+        # 过滤后为空即返回空结果 —— 不能“那就不滤了”。
+        if not kept:
+            return {"lexical": [], "structured": [], "dense": []}
+        scope = kept
+        out: Dict[str, List[SearchHit]] = {
+            "lexical": _lexical_hits(scope, tokens, concepts)[: max(query.top_k * 3, 10)],
+            "structured": _structured_hits(scope, query),
+            "dense": [],
+        }
+        in_scope = {c.chunk_id for c in scope}
+        for h in (dense_hits or []):
+            # 稠密通道的块也要过时效闸门（与另两个通道同口径）
+            if h.chunk.chunk_id not in in_scope:
+                continue
+            expired, not_yet = time_status(h.chunk, today)
+            if expired:
+                continue
+            hh = h.model_copy(deep=True)
+            hh.expired = False
+            hh.not_yet_effective = not_yet
+            out["dense"].append(hh)
+        for hits in out.values():
+            for h in hits:
+                expired, not_yet = time_status(h.chunk, today)
+                if expired:
+                    h.expired = True
+                h.not_yet_effective = not_yet
+                if h.chunk.identifiers:
+                    h.reasons.append("引用标识："
+                                     + ",".join(f"{k}={v}" for k, v in h.chunk.identifiers.items()))
+        return out
+
     def search(self, query: SearchQuery, dense_hits: Optional[List[SearchHit]] = None) -> List[SearchHit]:
         """主检索入口。
 
@@ -317,41 +364,15 @@ class RetrievalPipeline:
         若给它大权重，会出现"买家问 X-200 却报 X-300 的价格"——这类错对买家不可接受。
         型号识别的唯一权威是**结构化通道**。
         """
-        today = query.today or date.today()
-        concepts, tokens = self.enrich(query.text)
-        kept, dropped = self.filter(query)
-        # 属性过滤是**硬约束**，两个通道一视同仁（R11-01 / R11-02）：
-        # 过期、别国、HS 不对的块都不参与召回。
-        # 过滤后为空就返回空 —— 不能"那就不滤了"：那等于让 HS 编码不匹配的产品
-        # 照样被检索出来、报上价格。
-        if not kept:
+        by_channel = self.search_by_channel(query, dense_hits)
+        order = [n for n in ("lexical", "structured", "dense") if by_channel.get(n)]
+        if not order:
             return []
-        scope = kept
-        lexical = _lexical_hits(scope, tokens, concepts)[: max(query.top_k * 3, 10)]
-        structured = _structured_hits(scope, query)
-        # 精确匹配通道权重更高（k=10 vs 词法 k=60）
-        # 精确命中压过词法长尾；稠密通道权重最低（只是召回辅助）
-        channels = [lexical, structured]
-        k_by_channel = [60, 10]
-        if dense_hits:
-            channels.append(dense_hits)
-            k_by_channel.append(100)
-        merged = rrf_merge(channels, k_by_channel=k_by_channel)
-        # 步骤 7：引用装配 + 时效标注
-        #   过期块直接丢弃（不得进入结果、更不得被引用）；
-        #   尚未生效的条款保留但标记（可见，但不得当作"当前要求"输出）。
-        out: List[SearchHit] = []
-        for h in merged:
-            expired, not_yet = time_status(h.chunk, today)
-            if expired:
-                continue
-            h.expired = False
-            h.not_yet_effective = not_yet
-            if h.chunk.identifiers:
-                h.reasons.append("引用标识：" + ",".join(f"{k}={v}" for k, v in h.chunk.identifiers.items()))
-            out.append(h)
+        merged = rrf_merge([by_channel[n] for n in order],
+                            k_by_channel=[RRF_K[n] for n in order])
+        out = [h for h in merged if not h.expired]
         # 同一产品的多语版本只留一条（提问语种优先）：否则一次召回会把四个语言
-        # 版本都顶上来，把证书与法规挤出结果（拆 4 语后的副作用）。
+        # 版本都顶上来，把证书与法规挤出结果。
         best: Dict[str, SearchHit] = {}
         for h in out:
             key = _identity_key(h.chunk)

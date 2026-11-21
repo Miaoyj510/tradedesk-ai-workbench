@@ -186,6 +186,14 @@ switch ($Command.ToLower()) {
     & (Join-Path $Root "scripts\push.ps1")
     exit $LASTEXITCODE
   }
+  "eval" {
+    $py = Get-PythonExe
+    Write-Host "[eval] 分语种分通道检索评测（自建语料层；需要向量索引，否则稠密通道会自动跳过）" -ForegroundColor Cyan
+    $evalArgs = @()
+    if ($Dsn) { $evalArgs = @("--dsn", $Dsn) }
+    & $py (Join-Path $Root "scripts\eval_retrieval.py") @evalArgs
+    exit $LASTEXITCODE
+  }
   "clean" {
     Write-Host "[clean] 清理生成物（验证临时文件 / 缓存 / __pycache__）..." -ForegroundColor Cyan
     $targets = @(
@@ -229,6 +237,7 @@ TradeDesk-AI 开发脚本（项目根：$Root）
   push     推送当前分支到 GitHub（git 优先，失败自动切 API）
   audit4   S4 独立审核（审核 agent 断言，见 docs/S4-AUDIT-R15.md；R15 缺陷修完前为红）
   index    建立知识库向量索引（显式动作，会调云端 API）
+  eval     分语种分通道检索评测（S4-4c 自建语料层）
   clean    清理验证临时文件、缓存与 __pycache__
   # 说明：verify 跑完会自动清理临时物，clean 只是手动扫尾
   shell    进入项目 Python 交互环境
