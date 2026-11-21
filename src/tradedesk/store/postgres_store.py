@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import ConcurrentUpdate, audit_hash, enum_val
+from ..data.kb_seed import KB_VERSION
 from ..domain.models import (
     KBChunk,
     AuditEntry,
@@ -488,6 +489,7 @@ class PostgresStateStore:
                         "WHERE table_name='kb_embeddings' AND column_name='content_fp'")
             if cur.fetchone() is None:
                 cur.execute("ALTER TABLE kb_embeddings ADD COLUMN content_fp TEXT NOT NULL DEFAULT ''")
+            self._ensure_hnsw_index(cur)
             return
         if self.pgvector_available and self.vector_dim > 0:
             cur.execute(
@@ -500,12 +502,7 @@ class PostgresStateStore:
                 f"  content_fp TEXT NOT NULL DEFAULT '',"
                 f"  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
             self.embedding_column = "vector"
-            # ANN 索引：防量化下推到 pgvector 时，线性扫描会成为 50–100 并发下的瓶颈（N7）
-            try:
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_kb_embeddings_hnsw "
-                            "ON kb_embeddings USING hnsw (embedding vector_cosine_ops)")
-            except Exception:
-                pass
+            self._ensure_hnsw_index(cur)
         else:
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS kb_embeddings ("
@@ -517,6 +514,19 @@ class PostgresStateStore:
                 "  content_fp TEXT NOT NULL DEFAULT '',"
                 "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
             self.embedding_column = "jsonb"
+
+    def _ensure_hnsw_index(self, cur) -> None:
+        """ANN 索引：防量化下推到 pgvector 时，线性扫描会成为 50–100 并发下的瓶颈（N7）。
+
+        必须在**存量库**也执行（R17-02）：旧写法只在“表不存在”的分支里建索引，
+        所以从 4a 升上来的部署永远只有主键索引 —— 而验收条款 4b-07 写的是「走 pgvector + HNSW」。
+        失败要打日志，不能静默。
+        """
+        try:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_kb_embeddings_hnsw "
+                        "ON kb_embeddings USING hnsw (embedding vector_cosine_ops)")
+        except Exception as exc:
+            print(f"[pgvector] HNSW 索引创建失败（近邻检索将退化为全表扫描）：{exc}")
 
     def upsert_kb_embedding(self, chunk_id, kb_version, model, vector, content_fp="") -> None:
         vec = [float(x) for x in vector]
@@ -567,7 +577,7 @@ class PostgresStateStore:
                 out.append((chunk_id, model, [float(x) for x in vec]))
         return out
 
-    def search_kb_vectors(self, query_vec, top_k: int = 10):
+    def search_kb_vectors(self, query_vec, top_k: int = 10, kb_version: str = ""):
         """pgvector 近邻检索（走 HNSW 索引）→ [(chunk_id, score)]。
 
         只在列类是 vector 时可用；JSONB 降级下返回空列表（调用方回退到内存索引）。
@@ -575,12 +585,15 @@ class PostgresStateStore:
         if self.embedding_column != "vector":
             return []
         vec = "[" + ",".join(f"{float(x):.6f}" for x in query_vec) + "]"
+        version = kb_version or KB_VERSION
         with self.conn.cursor() as cur:
+            # 必须按库版本过滤（R17-01）：内存口径是过滤的，PG 不过滤就会让旧版本向量
+            # 占满 LIMIT 的名额 → 当前库的向量被挤出结果，稠密通道在 PG 上静默变空。
             cur.execute(
                 "SELECT chunk_id, 1 - (embedding <=> CAST(%s AS vector)) AS score "
-                "FROM kb_embeddings WHERE embedding IS NOT NULL "
+                "FROM kb_embeddings WHERE embedding IS NOT NULL AND kb_version = %s "
                 "ORDER BY embedding <=> CAST(%s AS vector) LIMIT %s",
-                (vec, vec, int(top_k)))
+                (vec, version, vec, int(top_k)))
             return [(cid, float(score)) for cid, score in cur.fetchall()]
 
     def list_kb_embedding_meta(self, kb_version=None):
