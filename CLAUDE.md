@@ -123,6 +123,9 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 
 - **厂商表在 `src/tradedesk/llm/providers.py`**：换厂商 = 改表里一行 + 改一个 env，业务代码不动。
   基址地址**按厂商分开**（每家各有 `base_url_env`），不会拿 MiniMax 的地址去请求阿里云。
+  ⚠️ **但 key 还没隔离（R19-01，审核实测）**：`config.llm_api_key` 会兜底到旧的 `MINIMAX_API_KEY`，
+  `resolve_api_key` 又拿它当 fallback → 切到阿里云/智谱时**MiniMax 的密钥会被发过去**。
+  换厂商前先清掉别的厂商的 key；修完 R19-01 这条警告才能撤。
 - **`MiniMax-Text-01` 已下线**（实测 HTTP 404 "no longer available"），`MiniMax-M2` 也一样返回 404 ——
   **`/v1/models` 列表不等于可用**。当前可用：`MiniMax-M3` / `MiniMax-M3.1-Flash`（默认已改 M3）。
 - **MiniMax-M3 把思考过程写在 `message.content` 里**（`<think>...</think>`）——

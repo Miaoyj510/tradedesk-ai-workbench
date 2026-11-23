@@ -169,6 +169,12 @@ switch ($Command.ToLower()) {
     else { & $py (Join-Path $Root "scripts/audit_s4.py") }
     exit $LASTEXITCODE
   }
+  "audit5" {
+    $py = Get-PythonExe
+    Write-Host "[audit5] 运行 S5 独立审核（审核 agent 的断言，非自证）" -ForegroundColor Cyan
+    & $py (Join-Path $Root "scripts/audit_s5.py")
+    exit $LASTEXITCODE
+  }
   "index" {
     $py = Get-PythonExe
     Write-Host "[index] 建立知识库向量索引（**会调云端嵌入 API，会计费**）" -ForegroundColor Cyan
@@ -247,6 +253,7 @@ TradeDesk-AI 开发脚本（项目根：$Root）
   serve    启动 HTTP 接口（FastAPI，/docs 有接口文档）
   push     推送当前分支到 GitHub（git 优先，失败自动切 API）
   audit4   S4 独立审核（审核 agent 断言，见 docs/S4-AUDIT-R15.md；R15 缺陷修完前为红）
+  audit5   S5 独立审核（审核 agent 断言，见 docs/S5-AUDIT-R19.md；R19 缺陷修完前为红）
   index    建立知识库向量索引（显式动作，会调云端 API）
   eval     分语种分通道检索评测（S4-4c 自建语料层）
   evallm  模型层分语种评测（S5-1c；加 -Live 才跑真实云端，会产生费用）
