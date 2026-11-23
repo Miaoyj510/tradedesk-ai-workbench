@@ -190,6 +190,12 @@ class Supervisor:
         self._log(thread.thread_id, EventType.THREAD_CREATED,
                   {"stage": thread.stage.value, "intents": [i.value for i in intents],
                    "message_hash": message_hash})
+        # 买家原话留痕（S6-1a）：之前只存了 message_hash（去重用），
+        # **原话本身没落库**——而前端要展示“买家原话”（FR-EVA-02）。
+        # 静态原型里那一栏是 mock 数据，接真数据时无法显示——这里补上。
+        self._log(thread.thread_id, EventType.MESSAGE_RECEIVED,
+                  {"message": message, "language": language.value,
+                   "company": company or "", "country": country or ""})
 
         customer = self.store.get_customer(buyer_id)
         profile = {"company": company or (customer.company if customer else buyer_id),

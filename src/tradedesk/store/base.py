@@ -40,6 +40,7 @@ def summarize_llm_usage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     http_calls = 0
     max_cost: Optional[float] = None
     by_lang: Dict[str, Dict[str, Any]] = {}
+    by_day: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         for k in tokens:
             tokens[k] += int(r.get(k) or 0)
@@ -52,12 +53,23 @@ def summarize_llm_usage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                                            "cost_cny": 0.0, "priced_count": 0})
         bucket["count"] += 1
         bucket["total_tokens"] += int(r.get("total_tokens") or 0)
+        # 按日（S6 看板的成本趋势折线用）
+        ts = str(r.get("ts") or "")
+        day = ts[:10]
+        if day:
+            db = by_day.setdefault(day, {"count": 0, "total_tokens": 0,
+                                         "cost_cny": 0.0, "priced_count": 0})
+            db["count"] += 1
+            db["total_tokens"] += int(r.get("total_tokens") or 0)
         if cost is not None:
             c = float(cost)
             total_cost += c
             priced += 1
             bucket["cost_cny"] += c
             bucket["priced_count"] += 1
+            if day:
+                by_day[day]["cost_cny"] += c
+                by_day[day]["priced_count"] += 1
             max_cost = c if max_cost is None else max(max_cost, c)
     out: Dict[str, Any] = {
         "count": len(rows),
@@ -72,6 +84,7 @@ def summarize_llm_usage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "avg_cost_cny": (total_cost / priced) if priced else None,
         "max_cost_cny": max_cost,
         "by_lang": by_lang,
+        "by_day": by_day,
     }
     return out
 

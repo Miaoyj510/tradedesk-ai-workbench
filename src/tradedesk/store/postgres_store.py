@@ -423,7 +423,7 @@ class PostgresStateStore:
                           thread_id: Optional[str] = None) -> Dict[str, Any]:
         """按语种 / 线程汇总成本（口径与 SQLite 一致）。"""
         sql = ("SELECT lang, prompt_tokens, completion_tokens, cached_tokens, total_tokens, "
-               "http_calls, cost_cny, degraded FROM llm_usage WHERE TRUE")
+               "http_calls, cost_cny, degraded, ts FROM llm_usage WHERE TRUE")
         args: List[Any] = []
         if lang:
             sql += " AND lang = %s"
@@ -435,7 +435,8 @@ class PostgresStateStore:
             cur.execute(sql, args)
             rows = [{"lang": r[0], "prompt_tokens": r[1], "completion_tokens": r[2],
                      "cached_tokens": r[3], "total_tokens": r[4], "http_calls": r[5],
-                     "cost_cny": r[6], "degraded": r[7]} for r in cur.fetchall()]
+                     "cost_cny": r[6], "degraded": r[7],
+                     "ts": r[8].isoformat() if r[8] else ""} for r in cur.fetchall()]
         return summarize_llm_usage(rows)
 
     def list_audit(self) -> List[AuditEntry]:

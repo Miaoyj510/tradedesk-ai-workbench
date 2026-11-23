@@ -188,6 +188,18 @@ def _build_rules(low_conf_threshold: float, amount_threshold: float) -> List[Gat
     ]
 
 
+def gate_catalog(low_conf_threshold: float = 0.55,
+                 amount_threshold: float = 5000.0) -> List[Gate]:
+    """返回 11 条闸门的**定义**（不含命中状态）。
+
+    给前端的闸门表用：它需要知道“有哪些闸门、哪些是强制项”，
+    而不是只看本次命中的那几条。命中数由调用方自己累加。
+    """
+    rules = _build_rules(low_conf_threshold, amount_threshold)
+    return [Gate(gate_id=r.gate_id, title=r.title, must=r.must, hit=False, desc=r.desc)
+            for r in rules]
+
+
 def evaluate_gates(thread: ThreadState, draft: Optional[Draft],
                    low_conf_threshold: float = 0.55,
                    amount_threshold: float = 5000.0) -> List[Gate]:

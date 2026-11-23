@@ -185,6 +185,17 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
             for e in app.state.ctx.store.list_events(thread_id)
         ]
 
+    # ------------------------------------------------------------ 工作台读模型（S6-1a）
+    @app.get("/workbench")
+    def workbench(sup: Supervisor = Depends(supervisor)) -> Dict[str, Any]:
+        """工作台的聚合读模型（BFF）。
+
+        前端原型只吃一份 mock（`assets/data.js`）。接真数据时若让前端自己拼 N+1 个接口，
+        闸门判定会被前端重算一遍（而闸门是后端的领域逻辑）——这里统一组装。
+        """
+        from .workbench import build_workbench
+        return build_workbench(app.state.ctx)
+
     # ------------------------------------------------------------ 成本口径（PRD 12.3 / 12.4）
     @app.get("/usage/costs")
     def usage_costs(lang: Optional[str] = None,
