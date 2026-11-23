@@ -136,6 +136,84 @@ def _buyer_message(events) -> str:
     return ""
 
 
+# 事件 → 时间线文案（前端展示用）
+def _timeline(events) -> List[Dict[str, Any]]:
+    out = []
+    for e in events:
+        p = e.payload or {}
+        text = None
+        accent = False
+        if e.event_type == EventType.THREAD_CREATED:
+            text = "线程已建立（阶段 %s）" % p.get("stage", "")
+        elif e.event_type == EventType.MESSAGE_RECEIVED:
+            text = "买家来信（%s）" % (p.get("language") or "")
+        elif e.event_type == EventType.GATE_EVALUATED:
+            text = "Sentinel 核验 · 风险级别 %s" % (p.get("risk_level") or "")
+        elif e.event_type == EventType.DRAFT_GENERATED:
+            if p.get("suppressed"):
+                text = "风控命中，抑制输出"
+                accent = True
+            else:
+                text = "生成草稿 · 引用 %d 条" % int(p.get("citations") or 0)
+        elif e.event_type == EventType.SIGNED_OFF:
+            text = "人工签核：%s" % (p.get("action") or "")
+            accent = True
+        elif e.event_type == EventType.SENT:
+            text = "已发送"
+            accent = True
+        elif e.event_type == EventType.HUMAN_TAKEOVER:
+            text = "转人工：%s" % (p.get("reason") or "")
+            accent = True
+        elif e.event_type == EventType.STAGE_CHANGED:
+            text = "阶段推进 → %s" % (p.get("to") or p.get("stage") or "")
+        elif e.event_type == EventType.WRITE_REJECTED:
+            text = "写操作被拒：%s" % (p.get("reason") or "")
+            accent = True
+        elif e.event_type == EventType.TRANSITION_REJECTED:
+            text = "阶段推进被拒：%s" % (p.get("reason") or "")
+        if text is None:
+            continue
+        out.append({"time": e.ts.strftime("%H:%M"), "text": text, "accent": accent})
+    return out
+
+
+def _messages(events, company: str) -> List[Dict[str, Any]]:
+    """买家原话（前端会话栏）。"""
+    out = []
+    for e in events:
+        if e.event_type != EventType.MESSAGE_RECEIVED:
+            continue
+        p = e.payload or {}
+        out.append({
+            "who": "buyer",
+            "name": p.get("company") or company,
+            "time": e.ts.strftime("今天 %H:%M"),
+            "lang": p.get("language") or "",
+            "text": p.get("message") or "",
+            "attach": "",
+        })
+    return out
+
+
+def _evidence(events) -> List[Dict[str, str]]:
+    """Sentinel 证据链（从 GATE_EVALUATED 事件里取）。
+
+    后端的证据条目是 `{\"条目 ID\": ..., \"主体\": ...}` 这种字关字典，
+    而前端的证据行是 `{k, v}` —— 这里展平为一个条目一行。
+    """
+    out = []
+    for e in events:
+        if e.event_type != EventType.GATE_EVALUATED:
+            continue
+        for item in (e.payload or {}).get("evidence") or []:
+            if isinstance(item, dict):
+                for k, v in item.items():
+                    out.append({"k": str(k), "v": str(v)})
+            else:
+                out.append({"k": "证据", "v": str(item)})
+    return out
+
+
 def _thread_payload(ctx, thread, now: datetime) -> Dict[str, Any]:
     store = ctx.store
     sup = ctx.supervisor
@@ -173,8 +251,13 @@ def _thread_payload(ctx, thread, now: datetime) -> Dict[str, Any]:
     for c in (draft.citations if draft else []):
         citations.append({"id": c.citation_id, "type": c.type, "note": c.note})
 
+    from ..runtime.supervisor import draft_id as _draft_id
+
     return {
         "id": thread.thread_id,
+        # draft_id 必须由后端给（签核与发送都要用它签发闸门令牌）——
+        # 前端不得自己拼这个规则，规则一变就会拿错令牌。
+        "draft_id": _draft_id(thread.thread_id),
         "company": company,
         "country": country,
         "flag": country[:2].upper(),
@@ -196,6 +279,9 @@ def _thread_payload(ctx, thread, now: datetime) -> Dict[str, Any]:
                     "hit": bool(hit_map.get(g.gate_id.value))} for g in gates],
         "events": [{"seq": e.seq, "type": e.event_type.value, "actor": e.actor.value,
                     "ts": e.ts.isoformat(), "payload": e.payload} for e in events],
+        "messages": _messages(events, company),
+        "timeline": _timeline(events),
+        "evidence": _evidence(events),
         "signed_off": bool(thread.price_signed_off),
         "sent_at": thread.sent_at.isoformat() if thread.sent_at else None,
     }

@@ -1,6 +1,8 @@
 /* TradeDesk AI Workbench — 交互脚本（原型：本地 mock 数据） */
 (function () {
-  const D = window.TD;
+  // D 可重定向：真数据模式下会用后端读模型替换掉 mock 部分（S6-1b）。
+  let D = window.TD;
+  let currentSource = 'mock';   // mock | api
   const $ = (s, r) => (r || document).querySelector(s);
   const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
 
@@ -66,15 +68,62 @@
     setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity 240ms ease'; setTimeout(() => el.remove(), 260); }, 3600);
   }
   window.TD.toast = toast;
+  D.toast = toast;
+
+  /* ================= 数据源（mock / api） ================= */
+  function setSourceBadge(text, kind) {
+    const el = $('#data-source');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'hint' + (kind ? ' badge-' + kind : '');
+  }
+
+  async function reloadLive() {
+    const live = await window.TDApi.loadWorkbench();
+    D = Object.assign({}, D, live);
+    window.TD = D;
+    D.toast = toast;
+    syncKpis();
+    return D;
+  }
+
+  async function loadSource() {
+    const cfg = window.TD_CONFIG || {};
+    let src = cfg.source || 'mock';
+    const m = /[?&]source=(mock|api)/.exec(window.location.search || '');
+    if (m) src = m[1];
+    if (src !== 'api' || !window.TDApi) {
+      currentSource = 'mock';
+      setSourceBadge('演示数据（mock）');
+      return 'mock';
+    }
+    try {
+      await reloadLive();
+      currentSource = 'api';
+      setSourceBadge('真实数据（api）', 'success');
+      return 'api';
+    } catch (err) {
+      currentSource = 'mock';
+      setSourceBadge('后端不可达，已降级为演示数据', 'danger');
+      toast('后端不可达，已降级为演示数据：' + err.message, 'danger');
+      return 'mock-fallback';
+    }
+  }
 
   /* ================= 工作台 ================= */
   const state = {
-    selected: D.threads[0].id,
+    // 不在模块加载时取第一个线程：真数据模式下这时后端还没拿到数据。
+    selected: null,
     filters: { stage: 'all', lang: 'all', risk: 'all' },
     q: '',
-    pending: D.kpis.pending,
-    cost: D.kpis.costToday
+    pending: 0,
+    cost: 0
   };
+
+  function syncKpis() {
+    state.pending = (D.kpis && D.kpis.pending) || 0;
+    state.cost = (D.kpis && D.kpis.costToday) || 0;
+  }
 
   function matchThread(t) {
     const f = state.filters;
@@ -276,7 +325,10 @@
     $$('[data-act]', host).forEach(b => b.addEventListener('click', () => onAction(t, b.dataset.act)));
   }
 
-  function onAction(t, act) {
+  async function onAction(t, act) {
+    if (currentSource === 'api' && window.TDApi) {
+      return await onActionApi(t, act);
+    }
     const map = {
       approve: ['签核通过，草稿已发送（演示）', ''],
       modify: ['已按你的修改发送（演示）', ''],
@@ -295,8 +347,41 @@
     renderThreads(); renderConversation(); renderReview();
   }
 
+  async function onActionApi(t, act) {
+    const draftId = t.draft_id;
+    if (!draftId) { toast('该线程没有草稿，无法签核', 'warn'); return; }
+    try {
+      if (act === 'approve') {
+        await window.TDApi.signoff(t.id, draftId, 'approve');
+        // 签核通过后发送是**两个写操作**，需要两张一次性闸门令牌。
+        await window.TDApi.send(t.id, draftId);
+        await reloadLive();
+        toast('已签核并发送', '');
+      } else if (act === 'modify') {
+        await window.TDApi.signoff(t.id, draftId, 'modify', { body: t.draft && t.draft.body });
+        await reloadLive();
+        toast('已按原文签核通过（未修改内容）', '');
+      } else if (act === 'reject') {
+        const reason = window.prompt('驳回必须带原因（会被归类并回灌提示词），例如：价格不符');
+        if (!reason) { toast('已取消驳回', 'warn'); return; }
+        await window.TDApi.signoff(t.id, draftId, 'reject', { reason: reason });
+        await reloadLive();
+        toast('已驳回，原因将回灌提示词', 'warn');
+      } else {
+        toast('该动作在真数据模式下暂未开放（后端接口不支持）', 'warn');
+      }
+      renderThreads(); renderConversation(); renderReview();
+    } catch (err) {
+      toast('操作失败：' + err.message, 'danger');
+    }
+  }
+
   function initWorkbench() {
     if (!$('#thread-list')) return;
+    syncKpis();
+    if (!state.selected || !D.threads.some(t => t.id === state.selected)) {
+      state.selected = D.threads.length ? D.threads[0].id : null;
+    }
     renderThreads(); renderConversation(); renderReview();
 
     $('#kpi-pending').textContent = D.kpis.pending;
@@ -317,8 +402,24 @@
 
     const sel = $('#demo-script');
     if (sel) {
-      sel.innerHTML = D.demoScripts.map(s => '<option value="' + s.id + '">' + esc(s.label) + '</option>').join('');
-      sel.addEventListener('change', e => {
+      const opts = currentSource === 'api'
+        ? window.TDApi.scenarios.map(s => ({ id: s.id, label: s.label, payload: s.payload }))
+        : (D.demoScripts || []).map(s => ({ id: s.id, label: s.label }));
+      sel.innerHTML = opts.map(s => '<option value="' + esc(s.id) + '">' + esc(s.label) + '</option>').join('');
+      sel.addEventListener('change', async e => {
+        const picked = opts.find(o => o.id === e.target.value);
+        if (currentSource === 'api' && picked && picked.payload) {
+          try {
+            const r = await window.TDApi.inbound(picked.payload);
+            await reloadLive();
+            state.selected = r.thread_id;
+            renderThreads(); renderConversation(); renderReview();
+            toast('已真实发起一条询盘 · ' + r.thread_id);
+          } catch (err) {
+            toast('发起询盘失败：' + err.message, 'danger');
+          }
+          return;
+        }
         state.selected = e.target.value;
         renderThreads(); renderConversation(); renderReview();
         toast('已切换到演示线程 ' + e.target.value);
@@ -429,7 +530,8 @@
     });
   }
 
-  document.addEventListener('DOMContentLoaded', () => {
+  document.addEventListener('DOMContentLoaded', async () => {
+    await loadSource();
     initWorkbench(); initDashboard(); initKnowledge();
   });
 })();

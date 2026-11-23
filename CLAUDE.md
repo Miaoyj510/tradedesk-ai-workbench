@@ -152,6 +152,11 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
   当时只看到“返回为空”根本无法区分“模型不会写”与“被截断了”。
 - **汇总口径只有一份**：`store/base.py` 的 `summarize_llm_usage()` 是唯一实现，SQLite 与 PostgreSQL 都只取行。
   单价未核实时 `cost_cny` 是 **None（不是 0）** —— 0 元会让人误以为“不费钱”。
+- **闸门判定只能在后端（`runtime/gates.py`）**：前端若自己重算闸门，就出现了第二份真相（R17 教训）。
+  所以前端只走**聚合读模型** `GET /workbench`（BFF），不自己拼 N+1 个接口。
+- **买家原话要落库**（FR-EVA-02）：只存 `message_hash` 的话前端展示的“买家原话”是空的。
+  现在 ingest 时补 `EventType.MESSAGE_RECEIVED` 事件。静态原型的 mock 把这个缺口藏了过去。
+- **质量分数不是实时数据**：分语种检索质量来自评测脚本产物（`dev.ps1 eval`），不在实时接口里 —— 给一个“看起来像实时”的分数比给不给更坏。
 - **价格表只在 `src/tradedesk/llm/pricing.py` 里维护**，必须带来源与取数日期；模型不在表里就返回 None（不猜、不估算）。
 - **`.env` 里各厂商专用的 key 变量名由厂商表统一管**（不写死在 `config.py`）；
   项目自己的 `.env` 解析器**不支持行内注释**（取右侧整个当值），注释必须单独占一行。
