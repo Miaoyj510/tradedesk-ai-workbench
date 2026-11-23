@@ -166,8 +166,11 @@ def run_offline(sb: Sandbox) -> None:
         res = sb.agent(chat_bad).handle(AgentRequest(
             thread=_thread(), language=Language.EN,
             context={"customer": {"country": "BR"}}, message=MSG))
+        # 降级也要记钱（S5-1b）：被拒绝前发过的 HTTP 调用可能已产生费用
         ok = (res.draft is not None and res.draft.model == "stub-template"
-              and res.draft.body and res.llm_usage is None)
+              and res.draft.body
+              and res.llm_usage is not None and res.llm_usage.get("degraded") is True
+              and res.llm_usage.get("cost_cny") is None)
         check(f"{name} → 退回模板草稿", ok,
               f"model={res.draft.model if res.draft else '?'} notes={res.notes}")
 
@@ -195,6 +198,50 @@ def run_offline(sb: Sandbox) -> None:
         context={"customer": {"country": "BR"}}, message=MSG))
     check("模板路径未受影响", res_t.draft is not None
           and res_t.draft.model == "stub-template" and res_t.draft.citations)
+
+
+def run_cost(sb: Sandbox) -> None:
+    """成本落库 + 签核留痕（S5-1b）。"""
+    section("§S6 成本落库与签核留痕（S5-1b）")
+    from fastapi.testclient import TestClient
+    from tradedesk.api.app import create_app
+    from tradedesk.api.deps import AppContext
+
+    store = sb.store
+    chat = FakeChat(text=GOOD_BODY)
+    chat.model = "MiniMax-M3"          # 已核实单价的模型名 → 能算出成本
+    ctx = AppContext(store=store, chat=chat)
+    client = TestClient(create_app(ctx))
+    d = client.post("/inbound", json={"buyer_id": "BY-BR-01", "message": MSG,
+                                      "language": "en", "company": "ACME", "country": "BR"}).json()
+    check("请求进入后能拿到草稿", bool(d.get("draft")))
+
+    s = store.llm_usage_summary()
+    check("云端调用已落库", s["count"] == 1, str(s))
+    check("HTTP 调用次数被记录", s["http_calls"] == 1, str(s["http_calls"]))
+    check("单价已核实 → 能算出成本", s["priced_count"] == 1
+          and s["cost_cny"] is not None, str(s["cost_cny"]))
+    check("单位成本 ≤ 0.2 元/条（PRD 12.4）",
+          (s["avg_cost_cny"] or 0) <= 0.2, "¥%.4f" % (s["avg_cost_cny"] or 0))
+
+    r = client.get("/usage/costs").json()
+    check("成本可按 API 查询", r["count"] == 1, str(r["count"]))
+    check("按语种聚合可用", "en" in (r.get("by_lang") or {}),
+          str(list((r.get("by_lang") or {}).keys())))
+
+    tid, did = d["thread_id"], d["draft_id"]
+    token = client.post(f"/threads/{tid}/gate-token", json={"draft_id": did}).json()["token"]
+    client.post(f"/threads/{tid}/signoff", json={"draft_id": did, "action": "approve"},
+                headers={"X-Gate-Token": token})
+    events = client.get(f"/threads/{tid}/events").json()
+    signed = [e for e in events if e["event_type"] == "signed_off"]
+    payload = signed[0]["payload"] if signed else {}
+    check("签核留痕记了草稿出处（哪个模型）",
+          payload.get("draft_model") == "fake:MiniMax-M3", str(payload.get("draft_model")))
+    check("签核留痕记了成本", payload.get("llm_cost_cny") is not None,
+          str(payload.get("llm_cost_cny")))
+    check("签核留痕仍包含原有的价格要素",
+          payload.get("unit_price") is not None, str(payload.get("unit_price")))
 
 
 def run_live(sb: Sandbox) -> None:
@@ -256,6 +303,7 @@ def main() -> int:
     sb = Sandbox()
     try:
         run_offline(sb)
+        run_cost(sb)
         if args.live:
             run_live(sb)
     finally:

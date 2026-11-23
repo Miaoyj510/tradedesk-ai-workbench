@@ -8,7 +8,9 @@
 param(
   [Parameter(Position = 0)][string]$Command = "help",
   [string]$Backend = "both",
-  [string]$Dsn = ""            # 指定数据库（两个 agent 用不同库，避免互相清表）
+  [string]$Dsn = "",           # 指定数据库（两个 agent 用不同库，避免互相清表）
+  [switch]$Live,              # 模型层评测是否跑真实云端（会产生费用）
+  [int]$PerLang = 10          # 模型层评测每语种跑多少条
 )
 
 # ⚠ 本文件必须保存为 **UTF-8 with BOM**：Windows PowerShell 5.1 会把无 BOM 的脚本按 GBK 读取，
@@ -194,6 +196,15 @@ switch ($Command.ToLower()) {
     & $py (Join-Path $Root "scripts\eval_retrieval.py") @evalArgs
     exit $LASTEXITCODE
   }
+  "evallm" {
+    $py = Get-PythonExe
+    Write-Host "[evallm] 模型层分语种评测（S5-1c；事实保真度 / 越权率 / 单位成本）" -ForegroundColor Cyan
+    $evalArgs = @()
+    if ($Live) { $evalArgs += "--live" }
+    if ($PerLang -gt 0) { $evalArgs += @("--per-lang", $PerLang) }
+    & $py (Join-Path $Root "scripts\eval_llm.py") @evalArgs
+    exit $LASTEXITCODE
+  }
   "clean" {
     Write-Host "[clean] 清理生成物（验证临时文件 / 缓存 / __pycache__）..." -ForegroundColor Cyan
     $targets = @(
@@ -238,6 +249,7 @@ TradeDesk-AI 开发脚本（项目根：$Root）
   audit4   S4 独立审核（审核 agent 断言，见 docs/S4-AUDIT-R15.md；R15 缺陷修完前为红）
   index    建立知识库向量索引（显式动作，会调云端 API）
   eval     分语种分通道检索评测（S4-4c 自建语料层）
+  evallm  模型层分语种评测（S5-1c；加 -Live 才跑真实云端，会产生费用）
   clean    清理验证临时文件、缓存与 __pycache__
   # 说明：verify 跑完会自动清理临时物，clean 只是手动扫尾
   shell    进入项目 Python 交互环境

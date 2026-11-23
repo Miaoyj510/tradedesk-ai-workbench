@@ -22,7 +22,17 @@ Transport = Callable[[str, dict, dict, int], dict]
 
 
 class LLMError(RuntimeError):
-    """云端模型调用失败（业务错误不重试）。"""
+    """云端模型调用失败（业务错误不重试）。
+
+    带 `calls`：失败前确实发过多少次 HTTP 调用。
+    失败的调用**也可能计费**（超时后重试成功的那一次就算钱），
+    但失败响应里没有 usage 字段 → 代表报错那一次的 token 数拿不到，
+    所以成本计量的口径是“已知单价的成功调用”，失败调用只记 HTTP 次数。
+    """
+
+    def __init__(self, message: str, calls: int = 0) -> None:
+        super().__init__(message)
+        self.calls = calls
 
 
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -55,6 +65,9 @@ class ChatResult:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # 为什么要它：**finish_reason="length" 意味着输出被截断**（思考 token 吃完了预算）。
+    # 不带它的话，只看到“模型返回空”——根本无法区分“模型不会写”与“被截断了”。
+    finish_reason: str = ""
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def usage(self) -> Dict[str, int]:
@@ -144,6 +157,7 @@ class ChatClient:
         usage = resp.get("usage") or {}
         return ChatResult(
             text=str(text), model=str(resp.get("model", "")),
+            finish_reason=str(choices[0].get("finish_reason") or ""),
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
             total_tokens=int(usage.get("total_tokens") or 0),
@@ -163,6 +177,11 @@ class ChatClient:
                 resp = self._transport(url, headers, payload, self.timeout_s)
                 result = self._parse(resp)
                 result.provider = self.provider.key
+                if result.finish_reason == "length":
+                    # 被截断 → 这不是“模型不会写”，而是“预算不够”（思考 token 吃完了预算）。
+                    # 不得原样重试：再给更大预算才是对的做法。
+                    raise LLMError(
+                        "模型输出被截断（max_tokens 不够，可能被思考 token 占满）", calls=self.calls)
                 return result
             except LLMError:
                 raise                       # 业务错误（鉴权/模型名/参数）不重试
@@ -172,4 +191,4 @@ class ChatClient:
                 last = exc
                 if attempt < self.retries:
                     time.sleep(0.4 * (attempt + 1))
-        raise LLMError(f"模型调用失败（已重试 {self.retries} 次）：{last}")
+        raise LLMError(f"模型调用失败（已重试 {self.retries} 次）：{last}", calls=self.calls)

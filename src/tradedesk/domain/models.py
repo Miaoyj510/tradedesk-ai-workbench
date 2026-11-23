@@ -193,6 +193,36 @@ class Draft(BaseModel):
     next_action: str = ""
     needs_human_confirmation: bool = False
     model: str = "stub"
+    # 草稿自带的模型用量与成本（S5-1b）。草稿自带才能让**签核留痕**知道
+    # 这份稿是谁写的、花了多少钱（PRD 8.5 GATE-01 的留痕要求）。
+    llm_usage: Optional[Dict[str, Any]] = None
+
+
+class LLMUsage(BaseModel):
+    """云端模型一次调用的用量与成本（S5-1b；PRD 12.3 / 12.4）。
+
+    **为什么单独建表而不是归到线程事件里**：成本要能按**语种 / 时间区间 / 线程**聚合，
+    事件表是按线程顺序存的，拿它做聚合很失败（且事件表会被上限保留期清理）。
+
+    `cost_cny` 为 None 表示**单价未核实**（如嵌入模型 embo-01）——不猜、不估算，
+    而不是“0 元”。汇总时会同时给出 `priced_count`，读的人才知道分母的分母。
+    """
+
+    id: str = ""
+    thread_id: str = ""
+    draft_id: str = ""
+    lang: str = "en"
+    provider: str = ""
+    model: str = ""
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_tokens: int = 0
+    total_tokens: int = 0
+    http_calls: int = 0
+    cost_cny: Optional[float] = None
+    price_tier: str = ""
+    degraded: bool = False
+    ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class GateToken(BaseModel):

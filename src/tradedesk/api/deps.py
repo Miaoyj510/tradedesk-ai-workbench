@@ -65,7 +65,7 @@ class AppContext:
         return build_embedder(cfg)
 
     def __init__(self, store: StateStore, registry: Optional[Registry] = None,
-                 config: Optional[Config] = None) -> None:
+                 config: Optional[Config] = None, chat=None) -> None:
         self.store = store
         self.config = config or get_settings()
         # 知识库：库里没有或版本对不上时才重新灌种子（生产应走版本化发布，见 PRD 13.4.8）
@@ -102,7 +102,8 @@ class AppContext:
         self.retriever = StoreRetriever(self.store, self.kb_version,
                                         embedder=self.embedder, vector_index=self.vector_index)
         # 云端对话客户端（S5-1a）：没 key 时为 None → Eva 自动退回模板路径。
-        self.chat = self._build_chat()
+        # `chat` 参数用于测试注入假客户端（不联网、不计费）。
+        self.chat = chat if chat is not None else self._build_chat()
         if self.chat is not None:
             print(f"[deps] 云端模型已接入：{self.chat.provider.name} / {self.chat.model}"
                   "（Eva 将走模型出稿路径；草稿仍需人工签核）")

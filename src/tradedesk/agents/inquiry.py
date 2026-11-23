@@ -25,7 +25,7 @@ from ..domain.agentspec import AgentSpec, AgentStatus, ToolMode, ToolSpec
 from ..domain.enums import Intent, Language
 from ..domain.models import Citation, Draft
 from .base import AgentRequest, AgentResult, AgentStatus as ResultStatus, BaseAgent
-from .draft_writer import DraftRejected, ModelDraftWriter, render_facts
+from .draft_writer import DraftRejected, ModelDraftWriter, numbers_of, render_facts
 
 # 询盘五类的多语关键词（对应 PRD 9.6 的重映射结果）
 # 词表是**子串匹配**（如 "late" 会命中 "late delivery"），所以词之间的包含关系会影响命中顺序。
@@ -323,16 +323,29 @@ class InquiryAgent(BaseAgent):
         if self.writer is not None:
             has_cert = bool(cert_line and cert_line != "—")
             facts = self._facts(p, cert_line, lang)
+            # 知识库真值里的数字 → 模型输出的**数字白名单**（价格/交期/MOQ 等）。
+            # 模型若把买家的数量写成价格（如 "USD 5000"），它不在这个集合里 → 被判越权。
+            truth_numbers = set()
+            for k in ("sku", "moq", "price_range", "lead_time", "cert_sentence"):
+                truth_numbers |= numbers_of(str(facts.get(k) or ""))
             try:
                 md = self.writer.write(lang, message,
                                        company=str((request.context.get("customer") or {}).get("company", "") or ""),
-                                       country=country, intents=intents, with_cert=has_cert)
-                body = render_facts(md.body, facts)
+                                       country=country, intents=intents, with_cert=has_cert,
+                                       truth_numbers=truth_numbers)
+                body = render_facts(md.body, facts, lang)
                 model_name = "%s:%s" % (md.provider, md.model)
                 llm_usage = md.usage()
                 notes.append("模型出稿：%s（输入 %d / 输出 %d tokens，HTTP 调用 %d 次）"
                              % (model_name, md.prompt_tokens, md.completion_tokens, md.calls))
             except DraftRejected as exc:
+                # 降级也要记钱：被拒绝前发过的 HTTP 调用可能已产生费用。
+                # token 数拿不到（失败响应没有 usage）→ cost_cny 留 None，不估算。
+                llm_usage = {"provider": "", "model": "", "prompt_tokens": 0,
+                             "completion_tokens": 0, "cached_tokens": 0,
+                             "total_tokens": 0, "calls": exc.calls,
+                             "cost_cny": None, "price_tier": "", "degraded": True,
+                             "reject_reason": str(exc)}
                 notes.append("模型输出被拒（%s），退回模板草稿" % exc)
         if not country:
             next_action = "买家所在国未知：先确认目的港所在国（合规要求按目的国落地），再人工签核"
@@ -346,6 +359,8 @@ class InquiryAgent(BaseAgent):
             needs_human_confirmation=needs_human,
             next_action=next_action,
             model=model_name,
+            # 草稿自带用量与成本：签核留痕要知道这份稿是谁写的、花了多少钱。
+            llm_usage=llm_usage,
         )
         return AgentResult(
             agent_id=self.agent_id,

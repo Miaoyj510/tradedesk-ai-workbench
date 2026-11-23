@@ -185,6 +185,17 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
             for e in app.state.ctx.store.list_events(thread_id)
         ]
 
+    # ------------------------------------------------------------ 成本口径（PRD 12.3 / 12.4）
+    @app.get("/usage/costs")
+    def usage_costs(lang: Optional[str] = None,
+                    thread_id: Optional[str] = None) -> Dict[str, Any]:
+        """按语种 / 线程汇总云端模型用量与成本。
+
+        **口径提示**：`cost_cny` 只累加**单价已核实**的行；未核实的行不计入，
+        而是用 `priced_count` 显示覆盖率（如嵌入模型 embo-01 的单价就还没核出来）。
+        """
+        return app.state.ctx.store.llm_usage_summary(lang=lang, thread_id=thread_id)
+
     # ------------------------------------------------------------ 来信接入
     @app.post("/inbound")
     def inbound(msg: InboundMessage, sup: Supervisor = Depends(supervisor)) -> Dict[str, Any]:
