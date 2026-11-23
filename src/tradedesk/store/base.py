@@ -16,9 +16,64 @@ from ..domain.models import (
     CustomerProfile,
     GateToken,
     KBChunk,
+    LLMUsage,
     ThreadEvent,
     ThreadState,
 )
+
+
+def summarize_llm_usage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """把用量行汇总成 PRD 12.4 的成本口径。
+
+    **两个后端共用这一个函数**（SQLite / PostgreSQL 都只取行，汇总在这里做）——
+    R17 的根因里有一条就是“同一个指标在两个后端算的不一样”，汇总逻辑不能各写一遍。
+
+    口径：
+    - `cost_cny` 是**已知单价的行**的合计；未知单价的行不计入，而是用 `priced_count` 显示覆盖率。
+    - 所以 `avg_cost_cny` 是**已计价行**的均值，不是全部行的均值。
+    """
+    total_cost = 0.0
+    priced = 0
+    degraded = 0
+    tokens = {"prompt_tokens": 0, "completion_tokens": 0,
+              "cached_tokens": 0, "total_tokens": 0}
+    http_calls = 0
+    max_cost: Optional[float] = None
+    by_lang: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        for k in tokens:
+            tokens[k] += int(r.get(k) or 0)
+        http_calls += int(r.get("http_calls") or 0)
+        if r.get("degraded"):
+            degraded += 1
+        cost = r.get("cost_cny")
+        lang = str(r.get("lang") or "")
+        bucket = by_lang.setdefault(lang, {"count": 0, "total_tokens": 0,
+                                           "cost_cny": 0.0, "priced_count": 0})
+        bucket["count"] += 1
+        bucket["total_tokens"] += int(r.get("total_tokens") or 0)
+        if cost is not None:
+            c = float(cost)
+            total_cost += c
+            priced += 1
+            bucket["cost_cny"] += c
+            bucket["priced_count"] += 1
+            max_cost = c if max_cost is None else max(max_cost, c)
+    out: Dict[str, Any] = {
+        "count": len(rows),
+        "prompt_tokens": tokens["prompt_tokens"],
+        "completion_tokens": tokens["completion_tokens"],
+        "cached_tokens": tokens["cached_tokens"],
+        "total_tokens": tokens["total_tokens"],
+        "http_calls": http_calls,
+        "degraded_count": degraded,
+        "priced_count": priced,
+        "cost_cny": total_cost if priced else None,
+        "avg_cost_cny": (total_cost / priced) if priced else None,
+        "max_cost_cny": max_cost,
+        "by_lang": by_lang,
+    }
+    return out
 
 
 def canonical_ts(dt: datetime) -> str:
@@ -103,3 +158,6 @@ class StateStore(Protocol):
     def issue_gate_token(self, token: GateToken) -> None: ...
     def consume_gate_token(self, token_id: str, thread_id: str, draft_id: str) -> bool: ...
     def get_gate_token(self, token_id: str) -> Optional[GateToken]: ...
+    def record_llm_usage(self, usage: LLMUsage) -> LLMUsage: ...
+    def llm_usage_summary(self, lang: Optional[str] = None,
+                          thread_id: Optional[str] = None) -> Dict[str, Any]: ...

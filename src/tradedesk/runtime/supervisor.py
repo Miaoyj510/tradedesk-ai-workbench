@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from ..agents.base import AgentRequest, AgentResult, AgentStatus
 from ..agents.registry import Registry
 from ..domain.enums import Actor, EventType, GateId, Intent, Language, RiskLevel, Stage
-from ..domain.models import Deadline, Draft, Gate, ThreadEvent, ThreadState
+from ..domain.models import Deadline, Draft, Gate, LLMUsage, ThreadEvent, ThreadState
 from ..domain.state_machine import TransitionRejected, apply_transition, build_thread
 from ..store.base import ConcurrentUpdate, StateStore
 from .gates import (
@@ -323,6 +323,32 @@ class Supervisor:
                    "model": draft.model,
                    "llm_usage": result.llm_usage}, actor=Actor.AGENT)
 
+        # 成本落库（S5-1b）：每次云端调用一行。
+        # 为什么不只放事件表：成本要能按**语种 / 时间区间 / 线程**聚合，
+        # 事件表是按线程顺序存的，拿它做聚合不合适且会被保留期清理。
+        if result.llm_usage:
+            try:
+                self.store.record_llm_usage(LLMUsage(
+                    thread_id=thread.thread_id,
+                    draft_id=draft_id(thread),
+                    lang=draft.lang.value,
+                    provider=str(result.llm_usage.get("provider") or ""),
+                    model=str(result.llm_usage.get("model") or ""),
+                    prompt_tokens=int(result.llm_usage.get("prompt_tokens") or 0),
+                    completion_tokens=int(result.llm_usage.get("completion_tokens") or 0),
+                    cached_tokens=int(result.llm_usage.get("cached_tokens") or 0),
+                    total_tokens=int(result.llm_usage.get("total_tokens") or 0),
+                    http_calls=int(result.llm_usage.get("calls") or 0),
+                    cost_cny=result.llm_usage.get("cost_cny"),
+                    price_tier=str(result.llm_usage.get("price_tier") or ""),
+                    degraded=bool(result.llm_usage.get("degraded")),
+                ))
+            except Exception as exc:  # 记账失败不得阻断主流程
+                print(f"[supervisor] 成本记账失败（不影响草稿）：{exc}")
+            if result.llm_usage.get("degraded"):
+                # 模型越权被拒 → 这份稿是模板写的，签核人必须知道。
+                thread.status_flags = list(thread.status_flags) + ["llm_degraded"]
+
         # 闸门评估（人工签核前）
         gates = evaluate_gates(thread, draft, self.low_confidence_threshold, self.amount_threshold)
         blocking = blocking_gates(gates)
@@ -530,6 +556,17 @@ class Supervisor:
             "tier": None,
             "clause_version": "v1",
         }
+        # 草稿出处与成本（S5-1b）：签核留痕要知道**这份稿是谁写的**。
+        # 不记的话：一条“人工签核过的报价”留痕里看不出签核时那份稿是模板还是模型写的，
+        # 就无法回溯“这份稿的质量问题是模型的还是模板的”。
+        draft = self.get_draft(thread_id)
+        if draft is not None:
+            terms["draft_model"] = draft.model
+            usage = draft.llm_usage or {}
+            if usage.get("cost_cny") is not None:
+                terms["llm_cost_cny"] = usage.get("cost_cny")
+            if usage.get("degraded"):
+                terms["llm_degraded"] = True
         if extra:
             terms.update({k: v for k, v in extra.items() if v is not None})
         return terms

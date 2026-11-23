@@ -14,16 +14,19 @@ import hashlib
 import json
 import sqlite3
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .base import ConcurrentUpdate, ConcurrentUpdate, audit_hash, canonical_ts, enum_val
+from .base import (ConcurrentUpdate, audit_hash, canonical_ts, enum_val,
+                   summarize_llm_usage)
 from ..domain.models import (
     KBChunk,
     AuditEntry,
     CustomerProfile,
     GateToken,
+    LLMUsage,
     ThreadEvent,
     ThreadState,
 )
@@ -117,6 +120,26 @@ CREATE TABLE IF NOT EXISTS gate_tokens (
     expires_at  TEXT NOT NULL,
     consumed_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id        TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL DEFAULT '',
+    draft_id  TEXT NOT NULL DEFAULT '',
+    lang      TEXT NOT NULL DEFAULT 'en',
+    provider  TEXT NOT NULL DEFAULT '',
+    model     TEXT NOT NULL DEFAULT '',
+    prompt_tokens    INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens    INTEGER NOT NULL DEFAULT 0,
+    total_tokens     INTEGER NOT NULL DEFAULT 0,
+    http_calls       INTEGER NOT NULL DEFAULT 0,
+    cost_cny  REAL,
+    price_tier TEXT NOT NULL DEFAULT '',
+    degraded  INTEGER NOT NULL DEFAULT 0,
+    ts        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_lang ON llm_usage(lang);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_thread ON llm_usage(thread_id);
 """
 
 
@@ -504,6 +527,44 @@ class SqliteStateStore:
             )
             self._conn.commit()
         return entry
+
+    # ---------- LLM 用量与成本（S5-1b） ----------
+    def record_llm_usage(self, usage: LLMUsage) -> LLMUsage:
+        """记一条云端模型用量。
+
+        成本不在这里算：算完的用量已经带着价格与档位（见 llm/pricing.py）。
+        单价未核实时 cost_cny 为 None（不猜、不估算）。
+        """
+        if not usage.id:
+            usage.id = uuid.uuid4().hex
+        with self._write_lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO llm_usage(id, thread_id, draft_id, lang, provider, model, "
+                "prompt_tokens, completion_tokens, cached_tokens, total_tokens, http_calls, "
+                "cost_cny, price_tier, degraded, ts) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (usage.id, usage.thread_id, usage.draft_id, usage.lang, usage.provider,
+                 usage.model, usage.prompt_tokens, usage.completion_tokens,
+                 usage.cached_tokens, usage.total_tokens, usage.http_calls,
+                 usage.cost_cny, usage.price_tier, 1 if usage.degraded else 0,
+                 usage.ts.isoformat()),
+            )
+            self._conn.commit()
+        return usage
+
+    def llm_usage_summary(self, lang: Optional[str] = None,
+                          thread_id: Optional[str] = None) -> Dict[str, Any]:
+        """按语种 / 线程汇总成本（口径见 store/base.py 的 summarize_llm_usage）。"""
+        sql = ("SELECT lang, prompt_tokens, completion_tokens, cached_tokens, total_tokens, "
+               "http_calls, cost_cny, degraded FROM llm_usage WHERE 1=1")
+        args: List[Any] = []
+        if lang:
+            sql += " AND lang = ?"
+            args.append(lang)
+        if thread_id:
+            sql += " AND thread_id = ?"
+            args.append(thread_id)
+        rows = [dict(r) for r in self._conn.execute(sql, args).fetchall()]
+        return summarize_llm_usage(rows)
 
     def list_audit(self) -> List[AuditEntry]:
         rows = self._conn.execute("SELECT * FROM audit_log ORDER BY seq").fetchall()

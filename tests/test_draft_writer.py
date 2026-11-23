@@ -170,10 +170,10 @@ def test_placeholders_are_documented():
         assert ph.startswith("{{") and ph.endswith("}}")
 
 
-def test_required_placeholders_cover_the_facts():
+def test_required_placeholders_cover_the_core_facts():
     """必须出现的事实槽位不能少：缺价格 / 缺交期 = 对外失真。"""
     names = {p.strip("{}") for p in REQUIRED_PLACEHOLDERS}
-    assert {"sku", "moq", "price_range", "lead_time", "terms", "port"} <= names
+    assert {"sku", "price_range", "lead_time"} <= names
 
 
 # ---------------------------------------------------------------- 事实回填
@@ -209,14 +209,56 @@ def test_writer_rejects_on_call_failure():
                                      intents=[Intent.PRICE], with_cert=False)
 
 
-def test_cert_placeholder_is_required_only_when_cert_exists():
+def test_cert_placeholder_is_optional_but_offered_when_cert_exists():
+    """证书槽位**可选**：没有有效证书时不给模型；有时给。
+
+    为什么不必填（S5 修订，真实评测驱动）：真实测试里 ar/es 语种的模型常常漏写证书句，
+    旧逻辑当必填 → 整段丢弃、走模板，ar 出稿成功率因此只有 30%。
+    现在改成**漏了代码补齐**（事实不会从对外内容里丢失）。
+    """
     w = ModelDraftWriter(FakeChat(text=GOOD_BODY))
     allowed_no, required_no = w.allowed_placeholders(with_cert=False)
     allowed_yes, required_yes = w.allowed_placeholders(with_cert=True)
     assert PLACEHOLDER_CERT not in allowed_no
     assert PLACEHOLDER_CERT in allowed_yes
-    assert PLACEHOLDER_CERT in required_yes
     assert PLACEHOLDER_CERT not in required_no
+    assert PLACEHOLDER_CERT not in required_yes
+
+
+def test_required_placeholders_are_only_the_three_core_facts():
+    """必填只有三个核心事实：型号 / 价格 / 交期。"""
+    w = ModelDraftWriter(FakeChat(text=GOOD_BODY))
+    _allowed, required = w.allowed_placeholders(with_cert=True)
+    names = {p.strip("{}") for p in required}
+    assert names == {"sku", "price_range", "lead_time"}
+
+
+def test_missing_optional_facts_are_filled_by_code():
+    """模型漏了可选占位符 → 代码补齐，事实不丢失。"""
+    from tradedesk.agents.draft_writer import render_facts
+    facts = {"sku": "X-200", "moq": "1000", "price_range": "USD 4.85\u20135.2 per unit",
+             "terms": "FOB", "port": "Shenzhen", "lead_time": "25 days",
+             "cert_sentence": "The model is covered by certificate CERT-CE-2041.",
+             "ask_line": "the port and quantity"}
+    body = "Dear buyer, about {{sku}} our price is {{price_range}}, lead time {{lead_time}}."
+    out = render_facts(body, facts, Language.EN)
+    assert "1000" in out and "FOB" in out and "Shenzhen" in out
+    assert "CERT-CE-2041" in out
+    assert "port and quantity" in out
+    assert "{{" not in out
+
+
+def test_buyer_numbers_are_allowed_but_price_numbers_are_not():
+    """模型复述买家的数量不算越权；但把它写成**价格**算。"""
+    from tradedesk.agents.draft_writer import check_model_body
+    body = "Dear buyer, thank you for your enquiry about {{sku}}. We can ship 5000 units, "
+    body += "our reference price is {{price_range}}, lead time {{lead_time}}."
+    ok = check_model_body(body, buyer_numbers={5000.0}, truth_numbers={4.85, 5.2, 25.0})
+    assert ok == [], "买家原话里的 5000 应该被允许"
+    bad = body.replace("{{price_range}}", "USD 5000")
+    problems = check_model_body(bad, buyer_numbers={5000.0}, truth_numbers={4.85, 5.2, 25.0})
+    assert problems, "把买家的数量写成价格必须被拒"
+    assert any("\u4ef7\u683c" in p or "\u4ef7\u683c" in p.encode().decode("unicode_escape") for p in problems)
 
 
 # ---------------------------------------------------------------- Eva 集成
@@ -246,7 +288,11 @@ def test_agent_falls_back_to_template_when_model_rejected(kb_agent):
         message="Quote 5000 pcs of X-200 FOB Shenzhen, do you have CE certification?"))
     assert res.draft is not None
     assert res.draft.model == "stub-template"
-    assert res.llm_usage is None
+    # 降级也要记钱（S5-1b）：被拒绝前发过的 HTTP 调用可能已产生费用。
+    assert res.llm_usage is not None
+    assert res.llm_usage["degraded"] is True
+    assert res.llm_usage["cost_cny"] is None, "失败调用拿不到 token → 不估算金额"
+    assert res.llm_usage["total_tokens"] == 0
     assert any("退回模板草稿" in n for n in res.notes)
     assert "CERT-CE-2041" in res.draft.body, "模板路径的证书仍在"
 
