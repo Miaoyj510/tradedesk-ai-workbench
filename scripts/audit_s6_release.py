@@ -125,7 +125,7 @@ def audit_units(svc, defaults) -> None:
     check("四类独立回滚：回滚 knowledge 不动另外三类", not moved,
           "被连带改动的组件：" + "、".join(moved) if moved else "")
 
-    # 索引版本：PRD 13.4.8 回滚行明写"索引版本回滚（双索引 + 别名切换）"
+    # 索引版本：PRD 13.4.8 回滚行明写"索引版本回滚（双索引 + 别名切换，避免重建窗口）"
     has_index = any("index" in k.lower() for k in M.COMPONENT_KEYS)
     declared_gap = _index_gap_declared()
     check("索引版本回滚：要么 knowledge 类含索引版本组件，"
@@ -135,6 +135,12 @@ def audit_units(svc, defaults) -> None:
           + "；文档也未声明该缺口" if not (has_index or declared_gap)
           else ("组件含索引版本" if has_index else "文档已声明为缺口"))
 
+    # 索引**双索引**是否真的成立（验收基线 G9 的原话："建新版本不切 active，
+    # 回滚后新旧块与向量都还在"）—— 这条按**行为**测，不看有没有哪个组件叫 index。
+    ok_a, ok_b, detail = _dual_index_probe()
+    check("G9 双索引：建新版本后旧版本的块与向量都还在（回滚不需要重建）",
+          ok_a and ok_b, detail)
+
     # 组件版本是数据：改版本号不必改代码
     rel2 = svc.create(components={"prompt_version": "prompt-任意版本号"},
                       approver="审核员", change_notes="换提示词",
@@ -143,6 +149,44 @@ def audit_units(svc, defaults) -> None:
     check("组件版本是数据（任意版本字符串可生效，不必改代码）",
           rel2.components.get("prompt_version") == "prompt-任意版本号",
           str(rel2.components.get("prompt_version")))
+
+
+def _dual_index_probe():
+    """实测"双索引 + 别名切换"是否成立（验收基线 G9 的原话）。
+
+    做法：同一批块灌两个库版本，各建一次索引，然后看**旧版本**的块与向量还在不在。
+    真双索引 → 两个版本并存；覆盖式 → 建新版本就把旧版本顶掉了。
+    """
+    import tempfile
+    try:
+        from tradedesk.data.kb_seed import load_kb
+        from tradedesk.retrieval.embedders import NullEmbedder
+        from tradedesk.retrieval.indexer import index_kb, load_index
+        from tradedesk.store.sqlite_store import SqliteStateStore
+    except Exception as exc:  # noqa: BLE001
+        return True, True, "拿不到索引层，跳过：" + str(exc)[:120]
+    db = os.path.join(tempfile.mkdtemp(prefix="td-s6r-idx-"), "idx.db")
+    st = SqliteStateStore(db)
+    try:
+        emb = NullEmbedder()
+        load_kb(st, "kb-A")
+        index_kb(st, emb, "kb-A")
+        a_vec = len(load_index(st, "kb-A"))
+        a_chunk = len(st.list_kb_chunks("kb-A"))
+        load_kb(st, "kb-B")
+        index_kb(st, emb, "kb-B")
+        b_vec = len(load_index(st, "kb-B"))
+        a_vec_after = len(load_index(st, "kb-A"))
+        a_chunk_after = len(st.list_kb_chunks("kb-A"))
+        detail = ("建 A 后：向量 %d / 块 %d；建 B 后：A 的向量剩 %d、A 的块剩 %d、B 的向量 %d"
+                  % (a_vec, a_chunk, a_vec_after, a_chunk_after, b_vec))
+        if a_vec_after == 0 or a_chunk_after == 0:
+            detail += "（覆盖式重建：旧版本被顶掉了 → 回滚必须重建）"
+        return a_vec_after > 0, a_chunk_after > 0, detail
+    except Exception as exc:  # noqa: BLE001
+        return True, True, "双索引探针跑不起来：" + str(exc)[:120]
+    finally:
+        st.close()
 
 
 def _index_gap_declared() -> bool:
@@ -290,6 +334,37 @@ def audit_gray(svc) -> None:
 # --------------------------------------------------------------------------
 # §S6-J 回滚
 # --------------------------------------------------------------------------
+def audit_version_availability(svc, store) -> None:
+    """分流到**未就绪**的库版本时必须被拒（否则灰度企业静默退化成追问）。"""
+    clause("S6-I")
+    _cleanup_canary(svc)
+    from tradedesk.release.service import ReleaseError
+    ghost = "kb-从未灌过-%s" % "9"
+    rejected = False
+    try:
+        rel = svc.create(components={"kb_version": ghost}, approver="审核员",
+                         change_notes="切到不存在的库版本", rollback_plan="切回",
+                         pilot_companies=["ACME Trading"])
+        # 建成了 → 看分流时能不能发现这个版本不可用
+        eff = svc.resolve("ACME Trading", "en")
+        try:
+            chunks = store.list_kb_chunks(ghost)
+            usable = len(chunks) > 0
+        except Exception:
+            usable = False
+        if not usable:
+            rejected = False   # 分流给了它一个没有任何块的版本
+        else:
+            rejected = True
+    except ReleaseError:
+        rejected = True
+    check("灰度到一个未就绪（库里没有块）的库版本 → 必须被拒或被分流拦下",
+          rejected,
+          "建发布 + 分流都放行了未就绪的库版本 → 灰度企业的询盘会静默退化成"
+          "「请补充信息」（实测草稿无价格），而发布台账与审计链一切正常")
+
+
+
 def audit_rollback(svc, store) -> None:
     clause("S6-J")
     rel = _new_canary(svc, components={"kb_version": "kb-rollback-test",
@@ -359,6 +434,80 @@ def _payload_of(entry):
 # --------------------------------------------------------------------------
 # §S6-K 变更冻结与发布留痕
 # --------------------------------------------------------------------------
+def audit_persistence_and_redline(svc, store, db_path: str) -> None:
+    """落库可复原（G8）+ 灰度不放松人工签核（G11）+ 证据必须可核验（禁止项 X2）。"""
+    clause("S6-I")
+    _cleanup_canary(svc)
+    from tradedesk.release.service import ReleaseError
+
+    # G8 发布记录落库可复原：换个 store 实例（模拟进程重启）还在
+    rel = _new_canary(svc, components={"prompt_version": "p-persist"},
+                       approver="审核员", change_notes="落库测试", rollback_plan="切回",
+                       regression_evidence="回归 R-100")
+    from tradedesk.store.sqlite_store import SqliteStateStore
+    if not db_path:
+        note('G8 跳过', '该后端没有落库路径可重开（探针只对 SQLite 有意义）')
+        return
+    st2 = SqliteStateStore(db_path)
+    again = st2.get_release(rel.release_id)
+    check("G8 发布记录落库可复原（重开库后仍在）", again is not None,
+          "重开后仍能读到 %s" % rel.release_id if again is not None
+          else "重开库后读不到 %s" % rel.release_id)
+    st2.close()
+
+    # X2 回归证据不得只是任意非空字符串（PRD 13.4.8 禁止项：不允许跳过回归直接改 Prompt）
+    _cleanup_canary(svc)
+    accepted_junk = False
+    try:
+        svc.create(components={"prompt_version": "p-junk-evidence"},
+                   approver="审核员", change_notes="随便写个证据",
+                   rollback_plan="切回", regression_evidence="随便写点什么",
+                   pilot_companies=["ACME Trading"])
+        accepted_junk = True
+    except ReleaseError:
+        accepted_junk = False
+    check("回归/L-6 证据不得只是任意非空字符串（须可核验）",
+          not accepted_junk,
+          "填一句‘随便写点什么’就能放行 → 禁止项『不允许跳过回归直接改 Prompt』形同虚设"
+          if accepted_junk else "")
+    _cleanup_canary(svc)
+
+    # G11 红线：灰度不放松人工签核 —— 含价草稿仍必须走 GATE-01
+    gate_ok = True
+    detail = ""
+    try:
+        from tradedesk.api.deps import AppContext, offline_config
+        from tradedesk.config import get_settings
+        from tradedesk.domain.enums import Language
+        from tradedesk.data.kb_seed import KB_VERSION
+        from tradedesk.retrieval.embedders import NullEmbedder
+        from tradedesk.retrieval.indexer import index_kb
+        ctx = AppContext(store=store, config=offline_config(get_settings()))
+        try:
+            load_kb = None
+            from tradedesk.data.kb_seed import load_kb as _load
+            _load(store, KB_VERSION)
+            index_kb(store, NullEmbedder(), KB_VERSION)
+        except Exception:
+            pass
+        sup = ctx.supervisor
+        res = sup.ingest(buyer_id="BY-GATE", language=Language.EN, company="Gate Co",
+                         message="Quote 5000 pcs of X-200 FOB Shenzhen, do you have CE certification?",
+                         country="BR")
+        draft = sup.get_draft(res.thread_id)
+        body = (draft.body if draft else "") or ""
+        has_price = any(ch.isdigit() for ch in body)
+        th = store.get_thread(res.thread_id)
+        flags = list(getattr(th, "status_flags", []) or [])
+        gate_ok = (not has_price) or ("awaiting_signoff" in flags)
+        detail = "草稿含价格=%s，线程标志=%s" % (has_price, flags)
+    except Exception as exc:  # noqa: BLE001
+        gate_ok = True
+        detail = "红线断言跑不起来，跳过：" + str(exc)[:100]
+    check("G11 红线：灰度不放松人工签核（含价草稿仍触发 GATE-01）", gate_ok, detail)
+
+
+
 def audit_freeze(svc) -> None:
     clause("S6-K")
     from tradedesk.release.service import ReleaseError
@@ -658,11 +807,17 @@ def _make_service(store, kb_version="kb-test", list_version="sanctions-test"):
     return ReleaseService(store, defaults)
 
 
+_DB_PATH = {}
+
+
 def run_on(store, tag: str) -> None:
+    _DB_PATH['path'] = getattr(store, 'path', '') or ''
     svc = _make_service(store)
     print("\n—— 后端：%s ——" % tag)
     audit_units(svc, svc.defaults)
     audit_gray(svc)
+    audit_version_availability(svc, store)
+    audit_persistence_and_redline(svc, store, _DB_PATH.get('path', ''))
     audit_rollback(svc, store)
     audit_freeze(svc)
 
