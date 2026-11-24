@@ -18,6 +18,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY src/ ./src/
 COPY scripts/ ./scripts/
+# 前端原型随应用同源托管（S6-2）：/ui/ 挂载静态页面，/ 跳转到 /ui/index.html
+COPY ui-prototype/ ./ui-prototype/
+
+# 数据目录（SQLite 回退形态用）：容器内可写
+RUN mkdir -p /app/data
 
 ENV PYTHONPATH=/app/src
 EXPOSE 8080

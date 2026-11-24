@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from ..domain.enums import Stage
@@ -24,6 +25,8 @@ class InboundMessage(BaseModel):
     language: str = "en"
     company: str = ""
     country: str = ""
+
+
 
 
 class SignOffBody(BaseModel):
@@ -54,6 +57,32 @@ class SendBody(BaseModel):
 
 class AdvanceBody(BaseModel):
     to_stage: str
+
+
+def mount_ui(app: FastAPI) -> bool:
+    """把前端原型托管在 `/ui`（S6-2）。
+
+    **为什么要同源**：前端调 `fetch('/workbench')` 是**相对路径**，
+    同源才不需要配 apiBase、也不需要跨域 CORS。分开部署时才用 config.js 的 apiBase 指回后端。
+
+    目录不存在时**跳过托管**（而不是启动报错）：API 本身不依赖前端目录，
+    只是页面托管失败了一个。
+    """
+    from pathlib import Path
+
+    from fastapi.staticfiles import StaticFiles
+    ui_dir = Path(__file__).resolve().parents[3] / "ui-prototype"
+    if not ui_dir.is_dir():
+        print(f"[api] 未找到前端目录（{ui_dir}），跳过静态托管（API 仍可用）")
+        return False
+    app.mount("/ui", StaticFiles(directory=str(ui_dir), html=True), name="ui")
+
+    @app.get("/", include_in_schema=False)
+    def _ui_index():
+        return RedirectResponse(url="/ui/index.html")
+
+    print(f"[api] 前端已托管：/ui/  归属 {ui_dir}")
+    return True
 
 
 def create_app(context: Optional[AppContext] = None) -> FastAPI:
@@ -195,6 +224,9 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
         """
         from .workbench import build_workbench
         return build_workbench(app.state.ctx)
+
+    # ------------------------------------------------------------ 前端静态托管（S6-2）
+    mount_ui(app)
 
     # ------------------------------------------------------------ 成本口径（PRD 12.3 / 12.4）
     @app.get("/usage/costs")

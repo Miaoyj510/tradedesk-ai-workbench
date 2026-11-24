@@ -4,7 +4,8 @@
 #   因此使用本机**已缓存**的 postgres:16-alpine 与 redis:7-alpine 镜像。
 #   pgvector 扩展在 S4 阶段通过本地构建镜像接入（见 docker/pgvector/Dockerfile），已完成。
 #
-# 启动：docker compose up -d db redis
+# 启动：docker compose up -d db redis          # 只启依赖
+#        docker compose up -d --build app                 # 启应用（前后端同源，http://127.0.0.1:8080/ui/）
 # 停止：docker compose down
 name: tradedesk
 
@@ -46,6 +47,40 @@ services:
       timeout: 3s
       retries: 20
 
+  app:
+    # 应用镜像（S6-2）：前后端同源，一个端口就能用。
+    # 构建：docker build -t tradedesk/app:local .
+    # 注意：基础镜像 python:3.11-slim 本机已缓存，但 pip install 需要能访问 PyPI。
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tradedesk/app:local
+    container_name: tradedesk-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # 容器采用 PostgreSQL（不再是永远那个没人用的容器）
+      TRADEDESK_DATABASE_URL: postgresql://tradedesk:tradedesk_local_dev@db:5432/tradedesk
+      TRADEDESK_REDIS_URL: redis://redis:6379/0
+      TRADEDESK_DB_PATH: /app/data/tradedesk.db
+      TRADEDESK_ENV: docker
+      TRADEDESK_LLM_DRAFT_ENABLED: "0"      # 演示形态不自动调云端（不产生费用）
+      TRADEDESK_EMBEDDER_ENABLED: "0"
+    ports:
+      - "8080:8080"
+    volumes:
+      - tradedesk_appdata:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
 volumes:
   tradedesk_pgdata:
   tradedesk_redisdata:
+  tradedesk_appdata:
