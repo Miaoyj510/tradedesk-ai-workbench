@@ -63,6 +63,8 @@ class ReleaseService:
                  observe_hours: int = OBSERVE_HOURS) -> None:
         self.store = store
         self.defaults = dict(defaults or {})
+        # 索引版本默认随知识库版本（向量按 kb_version 存取）
+        self.defaults.setdefault("index_version", self.defaults.get("kb_version", ""))
         self.observe_hours = int(observe_hours)
 
     # ------------------------------------------------------------ 读取
@@ -156,6 +158,12 @@ class ReleaseService:
         base = self.stable_components()
         merged = dict(base)
         merged.update(given)
+        # 换知识库版本时，**索引版本默认跟着换**：块与向量必须同版本，
+        # 否则新块没有对应索引（检索会掉到词法 + 结构化双通道）。
+        # 要单独把索引指向另一套已建好的索引，显式给 index_version 即可
+        # （别名切换，不重建 —— PRD 13.4.8）。
+        if "kb_version" in given and "index_version" not in given:
+            merged["index_version"] = given["kb_version"]
         changed = sorted({COMPONENT_CATEGORY[k] for k in given
                           if merged.get(k) != base.get(k)})
         if not changed:

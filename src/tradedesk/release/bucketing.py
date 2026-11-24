@@ -21,6 +21,8 @@
 2. 语种灰度：发布若限定了语种，**只有该语种的询盘**进灰度；
    语种未知（空）按保守处理 —— 不进灰度。
 3. 拿不到公司名（空）→ 不进灰度，走稳定版：宁可少灰度，不可错发版本。
+4. **白名单跨档位有效**：PILOT 档只认白名单；进入放量档后，白名单企业仍在灰度内
+   （放量是扩面，不是撤回试点）。
 """
 from __future__ import annotations
 
@@ -66,10 +68,15 @@ def in_canary(manifest: ReleaseManifest, company: str, lang: str = "") -> bool:
     if manifest.langs and (not lang or lang not in manifest.langs):
         # 限定语种的发布：语种不符或语种未知 → 不进灰度
         return False
+    whitelist = {normalize_company(c) for c in manifest.pilot_companies}
     if manifest.stage == "PILOT":
-        whitelist = {normalize_company(c) for c in manifest.pilot_companies}
         return norm in whitelist
     percent = STAGE_PERCENT.get(manifest.stage, 0)
     if percent <= 0:
         return False
+    if norm in whitelist:
+        # 白名单企业（试点军）**跨档位始终在灰度内**。
+        # 放量是"往里加更多人"，不是"把试点的人悄悄踢出去"——
+        # 否则发布记录里的灰度范围写着它，实际却已经不在灰度里了（留痕说的 ≠ 做的）。
+        return True
     return enterprise_bucket(company) < percent

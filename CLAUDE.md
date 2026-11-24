@@ -46,24 +46,25 @@ docs/         S2…S6-ACCEPTANCE.md、审核报告 R9…R21、S4-EVAL-BASELINE.m
 S1 → S2（R9→R10）→ S3（R11/R12/R14→R13/R16）→ S4-4a/4b/4c（R15→R16、R17→R18 `e002015`）
 → S5 厂商层 + 真模型出稿 + 成本落库 + 分语种评测（R19→R20 `623ca24`）
 → S6-1a/1b 前端接真数据 + S6-2 镜像 + S6-4 登录（R21→`92bb7d1`）均已交卷；
-→ **S6-3 灰度与回滚已交卷**（发布单元四类独立回滚 / 按企业分桶 / 观察窗推进 / 双索引别名切换），待审核 agent 核验。
+→ **S6-3 灰度与回滚已交卷**（发布单元四类独立回滚 / 按企业分桶 / 观察窗推进 / 双索引别名切换 / 越权闸门），
+审核 R22（6 个根因）已由实现线修完 —— 见 `docs/S6-FIX-R22.md`。
 
-`dev.ps1 check` **十二步**：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
+`dev.ps1 check` **十三步**：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
 → S2 独立审核 106/106 → pytest 257 passed → S3 独立审核 90/90 → S4 向量层 60/60（PG 62/62）
 → S4 独立审核（SQLite 78 / PG 85）→ S5 独立审核 54 项 → S6 独立审核（49 + 渲染层 15 项）
-→ **S6-3 灰度回滚自证（75 项 × SQLite / PostgreSQL 双后端）**。
+→ **S6-3 灰度回滚自证（85 项 × SQLite / PostgreSQL 双后端）** → **S6-3 独立审核（55 项，含越权路径）**。
 
 **审核线（`agent-b`）现状**：**R21 审核完成**（S6-1a 工作台读模型 + S6-1b 前端接真数据，
 断言 64 项，**12 个根因已由实现线修完（`agent-a @ 92bb7d1`）**）；`dev.ps1 audit6` 全绿（已入 `check` 第十一步）。
 上一轮 **R19**（S5 厂商层 + 真模型出稿）的 13 个根因**已由 R20 修完**（`agent-a @ 623ca24`），
 S5 独立审核已入 `check` 门禁。
-下一步：**审核 agent 核验 S6-3**（灰度与回滚，PRD 13.4.8）→ 用户确认 → 推送 —— 看 `docs/NEXT.md`。
+下一步：**审核 agent 复核 R22 修复** → 用户确认 → 合并 `agent-a` → `main` 并推送 —— 看 `docs/NEXT.md`。
 
 ## 常用命令
 
 ```powershell
 $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
-& $dev check              # 交付前自检（十二步）：语法 + S1 双后端 + S2/S3 自证 + pytest + S2…S6 独立审核 + S6-3 灰度回滚
+& $dev check              # 交付前自检（十三步）：语法 + S1 双后端 + S2/S3 自证 + pytest + S2…S6/S6-3 独立审核
 & $dev verify             # 只跑 S1 验证
 & $dev test               # 只跑 pytest
 & $dev audit              # S2 独立审核（审核方断言）
@@ -71,6 +72,7 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 & $dev audit4             # S4 独立审核（R15/R17 缺陷已修，绿）
 & $dev audit5             # S5 独立审核（R19 缺陷已由 R20 修完，绿）
 & $dev audit6             # S6 独立审核（R21 缺陷已修，绿；渲染层需 node；--dsn 派生暂存库 tradedesk_audit_s6）
+& $dev audit6r            # S6-3 独立审核（发布/灰度/回滚/越权；R22 已修，绿）
 & $dev index              # 建立知识库向量索引（显式动作，会调云端 API、计费）
 & $dev release status     # 发布台账（S6-3：status / create / advance / rollback / resolve）
 & $dev serve              # 起 HTTP 接口（http://127.0.0.1:8080/docs）

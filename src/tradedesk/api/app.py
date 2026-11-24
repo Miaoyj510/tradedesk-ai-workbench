@@ -325,13 +325,32 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
     def _release_service():
         return app.state.ctx.release_service
 
-    def _release_actor(body_approver: str, x_session_token: str) -> str:
-        """审批人：优先取请求体；没给就用当前登录用户。"""
-        if body_approver and body_approver.strip():
-            return body_approver.strip()
-        from .auth import session_user
-        user = session_user(x_session_token) or {}
-        return str(user.get("username", "") or "")
+    def _release_guard(x_session_token: str, body_approver: str = ""):
+        """发布写操作的权限与审批人（S6-3 越权闸门）。
+
+        两条规矩：
+
+        1. **审批人不得由请求体自称**。鉴权开启时审批人只能取自会话用户 ——
+           否则谁都能自称"经理"把发布批了。
+        2. **角色要有 `release` 能力**才能建发布 / 推进档位 / 回滚。
+
+        本地演示默认**不强制鉴权**（没有身份体系）：这时审批人仍须由请求体给出 ——
+        宁可让人多写一个字段，也不给一个假的默认审批人。
+        """
+        from .auth import auth_required, has_capability, session_user
+        if not auth_required():
+            return (body_approver or "").strip(), None
+        user = session_user(x_session_token)
+        if user is None:
+            return "", HTTPException(
+                status_code=401,
+                detail={"code": "not_authenticated", "message": "请先登录"})
+        if not has_capability(user, "release"):
+            return "", HTTPException(
+                status_code=403,
+                detail={"code": "forbidden",
+                        "message": "当前角色没有发布权限（建发布 / 推进档位 / 回滚）"})
+        return str(user.get("username") or user.get("name") or ""), None
 
     def _release_error(exc):
         from ..release.service import http_status_for
@@ -355,11 +374,13 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
                        x_session_token: str = Header(default="")) -> Dict[str, Any]:
         """建一次灰度发布（审批人 / 变更说明 / 回滚预案必填）。"""
         from ..release.service import ReleaseError
-        actor = _release_actor(body.approver, x_session_token)
+        approver, denied = _release_guard(x_session_token, body.approver)
+        if denied is not None:
+            raise denied
         try:
             manifest = _release_service().create(
                 components=body.components,
-                approver=actor,
+                approver=approver,
                 change_notes=body.change_notes,
                 rollback_plan=body.rollback_plan,
                 regression_evidence=body.regression_evidence,
@@ -367,7 +388,7 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
                 pilot_companies=body.pilot_companies,
                 langs=body.langs,
                 release_id=body.release_id or None,
-                actor=actor)
+                actor=approver)
         except ReleaseError as exc:
             raise _release_error(exc)
         return manifest.model_dump(mode="json")
@@ -377,9 +398,11 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
                         x_session_token: str = Header(default="")) -> Dict[str, Any]:
         """推进一档（PILOT → P20 → P50 → P100）；观察窗没到会拒绝。"""
         from ..release.service import ReleaseError
+        approver, denied = _release_guard(x_session_token)
+        if denied is not None:
+            raise denied
         try:
-            manifest = _release_service().advance(
-                release_id, actor=_release_actor("", x_session_token))
+            manifest = _release_service().advance(release_id, actor=approver)
         except ReleaseError as exc:
             raise _release_error(exc)
         return manifest.model_dump(mode="json")
@@ -389,10 +412,12 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
                          x_session_token: str = Header(default="")) -> Dict[str, Any]:
         """按类别回滚：app / agent / knowledge / sanctions 互不影响。"""
         from ..release.service import ReleaseError
+        approver, denied = _release_guard(x_session_token)
+        if denied is not None:
+            raise denied
         try:
             manifest = _release_service().rollback(
-                body.release_id, body.category,
-                actor=_release_actor("", x_session_token))
+                body.release_id, body.category, actor=approver)
         except ReleaseError as exc:
             raise _release_error(exc)
         return manifest.model_dump(mode="json")

@@ -125,6 +125,9 @@ def scenario_1_validation(store):
     check("发布创建成功并进入 PILOT 灰度",
           m.stage == "PILOT" and m.status == "canary" and m.changed_categories == ["knowledge"],
           "changed=%s" % m.changed_categories)
+    check("换知识库时索引版本同步跟随",
+          m.components.get("index_version") == "kb-2026.11-d",
+          "index=%s" % m.components.get("index_version"))
     check("发布号重复被拒",
           _expect_code(svc, "duplicate_release", release_id="REL-DUP") == "duplicate_release")
     check("同时只允许一个灰度",
@@ -179,8 +182,12 @@ def scenario_3_advance(store, svc, m):
           "命中 %d / 200" % len(selected))
     check("P20 命中比例落在合理区间", 10 <= len(selected) <= 50,
           "命中 %d / 200" % len(selected))
-    check("P20 档不认白名单（按桶分流）",
-          in_canary(m, "Pilot Corp", "en") == (enterprise_bucket("Pilot Corp") < 20))
+    check("P20 档白名单企业仍在灰度内（不被静默踢出）",
+          in_canary(m, "Pilot Corp", "en") is True
+          and svc.resolve("Pilot Corp", "en").source == "canary")
+    check("P20 档非白名单企业按桶分流",
+          in_canary(m, "Demo Import GmbH 001", "en")
+          == (enterprise_bucket("Demo Import GmbH 001") < 20))
 
     m = svc.advance(m.release_id, now=T0 + timedelta(hours=50))
     check("第二档推进到 P50", m.stage == "P50", "stage=%s" % m.stage)
@@ -191,6 +198,14 @@ def scenario_3_advance(store, svc, m):
     check("P100 切换四类别名",
           sorted(aliases) == ["agent", "app", "knowledge", "sanctions"],
           "别名=%s" % sorted(aliases))
+    from tradedesk.release.manifest import COMPONENT_CATEGORY, COMPONENT_KEYS
+    check("索引版本是独立登记的组件（PRD 13.4.8 回滚行）",
+          "index_version" in COMPONENT_KEYS
+          and COMPONENT_CATEGORY["index_version"] == "knowledge",
+          "组件=%s" % "、".join(COMPONENT_KEYS))
+    check("换知识库时索引版本同步跟随（块与索引同版本）",
+          svc.stable_components().get("index_version") == "kb-2026.11-d",
+          "index=%s" % svc.stable_components().get("index_version"))
     check("全量后分流走稳定版", svc.resolve("Pilot Corp", "en").source == "stable")
     check("全量后稳定版已是新知识库",
           svc.resolve("Pilot Corp", "en").components.get("kb_version") == "kb-2026.11-d")
@@ -417,6 +432,50 @@ def scenario_7_http(store):
     resp = client.post("/release/rollback",
                        json={"release_id": "REL-NOPE", "category": "app"})
     check("回滚不存在的发布返回 404", resp.status_code == 404, str(resp.status_code))
+
+    # ---- 越权路径（鉴权开启时）：审批人只能取自会话，角色要有发布权限 ----
+    import os
+    from tradedesk.config import reset_settings
+    os.environ["TRADEDESK_AUTH_REQUIRED"] = "1"
+    reset_settings()
+    try:
+        resp = client.post("/release", json={"components": {"app_image": "tradedesk/app:authz"},
+                                             "approver": "某人", "change_notes": "x",
+                                             "rollback_plan": "y",
+                                             "pilot_companies": ["Authz Ltd"]})
+        check("鉴权开启后无会话建发布返回 401", resp.status_code == 401, str(resp.status_code))
+
+        st = client.post("/auth/login", json={"username": "sales", "password": "demo1234"})
+        sales = (st.json() or {}).get("token", "")
+        st = client.post("/auth/login", json={"username": "manager", "password": "demo1234"})
+        manager = (st.json() or {}).get("token", "")
+        check("演示账号可登录拿会话", bool(sales) and bool(manager))
+
+        resp = client.post("/release", json={"components": {"app_image": "tradedesk/app:authz"},
+                                             "approver": "业务员自己填", "change_notes": "x",
+                                             "rollback_plan": "y",
+                                             "pilot_companies": ["Authz Ltd"]},
+                           headers={"X-Session-Token": sales})
+        check("业务员建发布返回 403（无发布权限）", resp.status_code == 403, str(resp.status_code))
+
+        resp = client.post("/release", json={"components": {"app_image": "tradedesk/app:authz"},
+                                             "approver": "某人自己填", "change_notes": "x",
+                                             "rollback_plan": "y",
+                                             "pilot_companies": ["Authz Ltd"]},
+                           headers={"X-Session-Token": manager})
+        check("经理建发布返回 200", resp.status_code == 200, resp.text[:100])
+        approver = resp.json().get("approver", "") if resp.status_code == 200 else ""
+        check("审批人取自会话用户（不认请求体自称）",
+              approver == "manager" and approver != "某人自己填", "approver=%s" % approver)
+
+        resp = client.post("/release/rollback",
+                           json={"release_id": resp.json().get("release_id", ""),
+                                 "category": "app"},
+                           headers={"X-Session-Token": sales})
+        check("业务员回滚返回 403（无发布权限）", resp.status_code == 403, str(resp.status_code))
+    finally:
+        os.environ["TRADEDESK_AUTH_REQUIRED"] = "0"
+        reset_settings()
 
 
 # --------------------------------------------------------------- 收尾自检

@@ -66,6 +66,26 @@ def test_lang_gate_excludes_other_and_unknown_langs():
     assert in_canary(m, "ACME Trading", "") is False
 
 
+def test_index_version_is_a_component_of_knowledge_category():
+    from tradedesk.release.manifest import COMPONENT_CATEGORY, COMPONENT_KEYS
+    assert "index_version" in COMPONENT_KEYS
+    assert COMPONENT_CATEGORY["index_version"] == "knowledge"
+    assert COMPONENT_CATEGORY["kb_version"] == "knowledge"
+
+
+def test_pilot_whitelist_survives_stage_advance():
+    """放量档不能把试点企业悄悄踢出灰度（留痕说的 = 做的）。"""
+    from datetime import datetime, timedelta, timezone
+    store, svc = _svc()
+    t0 = datetime(2026, 11, 24, 9, 0, tzinfo=timezone.utc)
+    m = _create(svc, pilot_companies=["Pilot Corp"], now=t0)
+    assert in_canary(m, "Pilot Corp", "en") is True
+    m = svc.advance(m.release_id, now=t0 + timedelta(hours=25))
+    assert m.stage == "P20"
+    assert in_canary(m, "Pilot Corp", "en") is True
+    assert svc.resolve("Pilot Corp", "en").source == "canary"
+
+
 def test_p20_selects_exactly_bucket_below_20():
     store, svc = _svc()
     names = ["Demo Import GmbH %03d" % i for i in range(200)]

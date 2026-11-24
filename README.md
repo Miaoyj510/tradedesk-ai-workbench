@@ -30,7 +30,7 @@
 $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 
 & $dev up        # 起 PostgreSQL 16(5433) + Redis 7(6380)
-& $dev check     # 交付前自检（十二步）：语法 + S1 双后端 + S2/S3 自证 + pytest + S2…S6 独立审核 + S6-3 灰度回滚
+& $dev check     # 交付前自检（十三步）：语法 + S1 双后端 + S2/S3 自证 + pytest + S2…S6/S6-3 独立审核
 & $dev verify    # 双后端验证（S1，53 项 × 2）
 & $dev test      # pytest（257 项）
 & $dev status    # 看容器与端口
@@ -90,7 +90,7 @@ $docker = "C:\Users\DELL\AppData\Local\Programs\DockerDesktop\resources\bin\dock
 1. **所有 `.ps1` 必须存成 UTF-8 with BOM**。Windows PowerShell 5.1（你终端里的那个）会把无 BOM 的脚本按 GBK 读，中文乱码 → 整段语法解析失败。PowerShell 7 无所谓，但为了两端一致，统一带 BOM。
 2. **Python 脚本不要强制 UTF-8 输出**。`verify_s1.py` 已改成自适应：交互式控制台沿用控制台原生编码（中文 Windows 是 GBK/CP936，终端里显示正常），被重定向或抓取时才用 UTF-8。
 
-> 交付前自检：在 **Windows PowerShell 5.1** 下跑 `& $dev check`，十二步全绿再交付。
+> 交付前自检：在 **Windows PowerShell 5.1** 下跑 `& $dev check`，十三步全绿再交付。
 > 验证方式：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<项目>\dev.ps1" check`
 ### 发布到 GitHub
 

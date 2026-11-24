@@ -8,6 +8,7 @@
     prompt_version     提示词资产版本
     glossary_version   多语术语表版本（随知识库快照一起版本化）
     kb_version         知识库版本
+    index_version      向量索引版本（PRD 13.4.8 回滚行：索引版本回滚）
     list_version       制裁/管制名单库版本
 
 它们归成**四个回滚类别**（PRD 13.4.8：发布单元四类独立回滚）：
@@ -42,6 +43,10 @@ COMPONENT_CATEGORY: Dict[str, str] = {
     "prompt_version": "agent",
     "glossary_version": "knowledge",
     "kb_version": "knowledge",
+    # 索引版本归 knowledge 类：PRD 13.4.8 的回滚行明写"索引版本回滚
+    # （索引用双索引 + 别名切换，避免重建窗口）"——索引与知识库同属一类，
+    # 但**版本号分开登记**：索引可以单独指向另一套已建好的索引（别名切换，不重建）。
+    "index_version": "knowledge",
     "list_version": "sanctions",
 }
 COMPONENT_KEYS = tuple(COMPONENT_CATEGORY)
@@ -111,6 +116,8 @@ def baseline_components(kb_version: str, list_version: str) -> Dict[str, str]:
         "prompt_version": PROMPT_VERSION,
         "glossary_version": kb_version,
         "kb_version": kb_version,
+        # 索引默认随知识库版本（向量按 kb_version 存取，见 store.upsert_kb_embedding）
+        "index_version": kb_version,
         "list_version": list_version,
     }
 
