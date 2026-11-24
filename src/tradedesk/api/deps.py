@@ -139,9 +139,19 @@ def offline_config(cfg: Optional[Config] = None) -> Config:
 
 
 def get_context() -> AppContext:
-    """默认上下文：SQLite（本地）。生产形态见 PRD 13.4。"""
+    """默认上下文。
+
+    **配了 `TRADEDESK_DATABASE_URL` 就用 PostgreSQL**（S6-2 的容器形态），否则用 SQLite（本地零依赖）。
+    为什么要这个分支：原来 compose 里的 db 容器在 compose 形态下**没人用**（
+    应用一直跑 SQLite）——那么“容器化部署”只做了一半，数据库容器是永远的。
+    """
     cfg = get_settings()
-    store = SqliteStateStore(cfg.db_path)
+    if cfg.database_url:
+        from .store.postgres_store import PostgresStateStore
+        store = PostgresStateStore(cfg.database_url)
+        print("[deps] 使用 PostgreSQL：" + cfg.database_url.split("@")[-1])
+    else:
+        store = SqliteStateStore(cfg.db_path)
     return AppContext(store=store, config=cfg)
 
 
