@@ -47,9 +47,13 @@ class StoreRetriever:
        它们只走属性过滤，进向量库只是噪声。
     """
 
-    def __init__(self, store, kb_version: str = "", embedder=None, vector_index=None) -> None:
+    def __init__(self, store, kb_version: str = "", embedder=None, vector_index=None,
+                 index_version: str = "") -> None:
         self.store = store
         self.kb_version = kb_version
+        # 索引版本（PRD 13.4.8）：**块**按 kb_version 取，**向量**按 index_version 取 ——
+        # 索引因此可以独立于块切换（回滚索引 = 指回旧的一套，不必重建）。
+        self.index_version = index_version or kb_version
         self.embedder = embedder
         self.vector_index = vector_index
         self._cache: List[KBChunk] = []
@@ -83,7 +87,7 @@ class StoreRetriever:
         旧写法把启动时的索引当一次性快照，发布流水线重建索引后应用不重启仍返回旧向量 ——
         这正是 S3 的 R11-07（改库后同进程不生效）在向量层的翻版。
         """
-        items = self.store.list_kb_embeddings(self.kb_version)
+        items = self.store.list_kb_embeddings(self.index_version)
         fp = _vectors_fingerprint(items)
         if self._vec_index is None or fp != self._vec_fp:
             from .vector_index import VectorIndex

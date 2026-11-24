@@ -97,9 +97,13 @@
 | G10 | PRD 11.4 | 建发布 / 推进 / 回滚 / 分流全部**留痕**（`release.create` / `release.advance` / `release.rollback` / `release.assign`） |
 | G11 | 红线 | 本切片**不含**"AI 全自动接单签合同"：灰度只决定"用哪一版知识库与提示词"，**报价与合同仍走人工签核** |
 | G12 | PRD 11.2 | 发布写操作有**角色闸门**：只有具备 `release` 能力的角色能建发布 / 推进 / 回滚；**审批人只能取自会话用户**，请求体自称一律不认 |
+| G13 | PRD 13.4.8 | **双索引真正成立**：块与向量的主键是 `(chunk_id, kb_version)`，同名块在两个库版本下并存；回滚切别名**不重建** |
+| G14 | PRD 13.4.8 | **索引版本被真正消费**：块按库版本取、向量按索引版本取；`index_version` 不是清单里的装饰字段 |
+| G15 | PRD 13.4.8 | **灰度到一个未就绪的库版本会被拦下**：建发布时补齐或拒绝，分流时兜底 —— 不允许台账正常、买家却收到空话 |
+| G16 | PRD 13.4.8 | **回归 / L-6 证据必须可核验**（带报告编号），填一句说明不放行 |
 
-**审核 R22（`docs/S6-FIX-R22.md`）**：判据 `docs/S6-3-AUDIT-CRITERIA.md` 写于实现交付之前；
-首轮 46 PASS / 9 FAIL → 6 个根因已修完 → 复跑 **55 PASS / 0 FAIL**。
+**审核 R22 + R23（`docs/S6-FIX-R22.md`）**：判据 `docs/S6-3-AUDIT-CRITERIA.md` 写于实现交付之前；
+三轮共 **11 个根因**全部修完 → 复跑 **66 PASS / 0 FAIL**（共 67 项）。
 
 **诚实边界（生产化项，本期不做）**
 
@@ -113,9 +117,9 @@
 
 ```powershell
 & $dev check                                   # 第十二步即本切片的自证
-python scripts/verify_s6_3.py --backend both    # 85 项 × SQLite / PostgreSQL
-python -m pytest tests/test_release.py -q      # 25 项单元测试
-python scripts/audit_s6_release.py --dsn <DSN> # 独立审核 55 项（审核方脚本）
+python scripts/verify_s6_3.py --backend both    # 91 项 × SQLite / PostgreSQL
+python -m pytest tests/test_release.py -q      # 28 项单元测试
+python scripts/audit_s6_release.py --dsn <DSN> # 独立审核 67 项（审核方脚本）
 ```
 
 ---
@@ -162,4 +166,4 @@ node scripts/audit_s6_ui.js http://127.0.0.1:8099
 
 1. S6 的判据以**条款号**为准（§2 全部映射到 PRD 条款），验收脚本与本文件逐条对账。
 2. 本轮 12 个根因里最要紧的是**渲染层从未被测过**这条自证盲区 —— 下个切片必须先补渲染层冒烟。
-3. S6-3（灰度与回滚）已交卷并通过独立审核（R22）：四类发布单元可独立回滚、按企业分桶、观察窗推进、双索引别名切换、越权闸门；但 CI / 三环境流水线 / 提示词热切换属**生产化项**，Demo 阶段不得对外声称"具备生产级灰度发布流水线"。
+3. S6-3（灰度与回滚）已交卷并通过独立审核（R22 + R23，三轮 11 个根因全修完）：四类发布单元可独立回滚、按企业分桶、观察窗推进、**双索引（复合主键）**、越权闸门、证据可核验；但 CI / 三环境流水线 / 提示词热切换属**生产化项**，Demo 阶段不得对外声称"具备生产级灰度发布流水线"。

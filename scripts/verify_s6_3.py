@@ -59,6 +59,11 @@ from tradedesk.store.sqlite_store import SqliteStateStore               # noqa: 
 
 RESULTS = []
 
+
+class KBChunkStub:
+    """取不到块时的占位（只为断言里不抛异常）。"""
+    extra = {}
+
 KB_BASE = "kb-2026.11-c"
 KB_V2 = "kb-2026.11-c-v2"
 LIST_BASE = "sanctions-2026.11-a"
@@ -114,6 +119,14 @@ def scenario_1_validation(store):
     check("Agent 变更缺回归证据被拒",
           _expect_code(svc, "regression_required",
                        components={"prompt_version": "1.1.0"}) == "regression_required")
+    check("回归证据必须是可核验的（填一句说明不放行）",
+          _expect_code(svc, "regression_evidence_unverifiable",
+                       components={"prompt_version": "1.2.0"},
+                       regression_evidence="随便写点什么") == "regression_evidence_unverifiable")
+    check("L-6 证据必须是可核验的（填一句说明不放行）",
+          _expect_code(svc, "risk_evidence_unverifiable",
+                       components={"list_version": "sanctions-2026.12-b"},
+                       risk_evidence="随便写点什么") == "risk_evidence_unverifiable")
     check("名单库变更缺 L-6 证据被拒",
           _expect_code(svc, "risk_evidence_required",
                        components={"list_version": "sanctions-2026.12-a"}) == "risk_evidence_required")
@@ -319,16 +332,39 @@ def scenario_6_dual_index(store):
     # 生产化应改为 (chunk_id, kb_version) 复合主键（已列入生产化项）。
     v2_chunks = build_demo_chunks(KB_V2)
     for c in v2_chunks:
-        c.chunk_id = c.chunk_id + "-v2"
+        # **同名块**（不加版本后缀）：复合主键 (chunk_id, kb_version) 下两个库版本
+        # 可以并存 —— 这才是真正的双索引。加后缀只是把主键冲突绕开了，证明不了共存。
         if c.doc_type == "产品规格" and c.identifiers.get("sku") == "X-200":
             extra = dict(c.extra or {})
             extra["price_low"] = 999.0
             extra["price_high"] = 999.0
             c.extra = extra
         store.upsert_kb_chunk(c)
-    check("v2 与 v1 块共存（未互相覆盖）",
-          store.get_kb_chunk("KB-A-SPEC-X-200") is not None
-          and store.get_kb_chunk("KB-A-SPEC-X-200-v2") is not None)
+    check("同名块在两个库版本下并存（复合主键 = 双索引前提）",
+          store.get_kb_chunk("KB-A-SPEC-X-200", KB_BASE) is not None
+          and store.get_kb_chunk("KB-A-SPEC-X-200", KB_V2) is not None)
+    check("两个版本的同名块内容各自独立（价格不同）",
+          (store.get_kb_chunk("KB-A-SPEC-X-200", KB_BASE) or KBChunkStub).extra.get("price_low") == 4.85
+          and (store.get_kb_chunk("KB-A-SPEC-X-200", KB_V2) or KBChunkStub).extra.get("price_low") == 999.0,
+          "v1=%s / v2=%s" % (
+              (store.get_kb_chunk("KB-A-SPEC-X-200", KB_BASE) or KBChunkStub).extra.get("price_low"),
+              (store.get_kb_chunk("KB-A-SPEC-X-200", KB_V2) or KBChunkStub).extra.get("price_low")))
+    # 灌一个新库版本**不得**抹掉旧版本（灌种子只清同版本）
+    from tradedesk.data.kb_seed import load_kb as _load_kb
+    before_a = len(store.list_kb_chunks(KB_BASE))
+    _load_kb(store, "kb-s63-extra")
+    check("灌新库版本不抹掉旧版本（只清同版本）",
+          len(store.list_kb_chunks(KB_BASE)) == before_a and before_a > 0,
+          "旧版本块数 %d → %d" % (before_a, len(store.list_kb_chunks(KB_BASE))))
+    # index_version 必须真的被检索/装配路径消费（不能只是清单里的一个字段）
+    consumed = [rel for rel in ("src/tradedesk/api/deps.py",
+                                 "src/tradedesk/retrieval/indexer.py",
+                                 "src/tradedesk/retrieval/store_retriever.py",
+                                 "src/tradedesk/agents/inquiry.py",
+                                 "src/tradedesk/runtime/supervisor.py")
+                if "index_version" in (ROOT / rel).read_text(encoding="utf-8")]
+    check("index_version 进检索与装配路径（不是装饰字段）", len(consumed) >= 3,
+          "消费方：%s" % "、".join(consumed))
 
     # 假向量 fixture：只验"向量按版本存、切换时选对应那套"，**不是真嵌入能力**
     # 维度必须与 pgvector 列一致（1536），否则 PostgreSQL 后端直接拒绝写入
@@ -381,7 +417,16 @@ def scenario_6_dual_index(store):
     check("灰度分流留痕（审计）", len(audits) >= 1, "审计条数=%d" % len(audits))
 
     svc.rollback(rel.release_id, "knowledge", now=T0 + timedelta(hours=101))
-    check("回滚不删数据：旧块仍在", store.get_kb_chunk("KB-A-SPEC-X-200") is not None)
+    check("回滚不删数据：旧块仍在", store.get_kb_chunk("KB-A-SPEC-X-200", KB_BASE) is not None)
+    # 灰度到一个"库里没块"的版本：建发布时必须把该版本补齐（否则询盘会静默退化成空话）
+    ghost = "kb-s63-ghost"
+    svc.create(components={"kb_version": ghost}, approver="张三",
+               change_notes="切到未就绪的库版本", rollback_plan="回滚 knowledge 类别",
+               pilot_companies=["Ghost Ltd"], now=T0 + timedelta(hours=102))
+    check("建发布时未就绪的库版本会被补齐（不留空版本）",
+          len(store.list_kb_chunks(ghost)) > 0,
+          "该版本块数=%d" % len(store.list_kb_chunks(ghost)))
+    svc.rollback(svc.canary().release_id, "knowledge", now=T0 + timedelta(hours=103))
     check("回滚不删数据：旧向量仍在", len(store.list_kb_embeddings(KB_BASE)) > 0)
     check("回滚不删数据：新版块也仍在", len(store.list_kb_chunks(KB_V2)) > 0)
 

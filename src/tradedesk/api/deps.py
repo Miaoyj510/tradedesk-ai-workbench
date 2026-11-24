@@ -108,25 +108,34 @@ class AppContext:
         # ---- 灰度检索器工厂（S6-3）----
         # 同一进程内不同企业可能命中不同的知识库版本 → 检索器**按版本缓存**，不共用一份。
         # 向量索引按版本加载且**只读**（load_index 不建索引）——建索引是显式动作（dev.ps1 index）。
-        self._retriever_cache: Dict[str, StoreRetriever] = {self.kb_version: self.retriever}
+        self._retriever_cache: Dict[str, StoreRetriever] = {
+            "%s|%s" % (self.kb_version, self.kb_version): self.retriever}
         self._retriever_lock = threading.Lock()
 
-        def _retriever_factory(kb_version: str) -> StoreRetriever:
+        def _retriever_factory(kb_version: str, index_version: str = "") -> StoreRetriever:
+            """按**发布版本**取检索器。
+
+            缓存键 = 库版本 + 索引版本：块按库版本取、向量按索引版本取
+            （PRD 13.4.8），所以索引可以独立于块切换 —— 缓存键必须带上索引版本。
+            """
             key = str(kb_version or "")
+            idx_key = str(index_version or "") or key
             if not key:
                 return self.retriever
+            cache_key = "%s|%s" % (key, idx_key)
             with self._retriever_lock:
-                cached = self._retriever_cache.get(key)
+                cached = self._retriever_cache.get(cache_key)
             if cached is not None:
                 return cached
             index = None
             try:
-                index = load_index(self.store, key)
+                index = load_index(self.store, key, idx_key)
             except Exception:
                 index = None
-            built = StoreRetriever(self.store, key, embedder=self.embedder, vector_index=index)
+            built = StoreRetriever(self.store, key, embedder=self.embedder,
+                                   vector_index=index, index_version=idx_key)
             with self._retriever_lock:
-                return self._retriever_cache.setdefault(key, built)
+                return self._retriever_cache.setdefault(cache_key, built)
 
         self.retriever_factory = _retriever_factory
 

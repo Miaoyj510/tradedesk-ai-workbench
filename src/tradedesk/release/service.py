@@ -17,8 +17,9 @@
 """
 from __future__ import annotations
 
+import re
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from .bucketing import in_canary
@@ -42,9 +43,16 @@ HTTP_STATUS: Dict[str, int] = {
     "validation": 422,
     "regression_required": 422,
     "risk_evidence_required": 422,
+    "regression_evidence_unverifiable": 422,
+    "risk_evidence_unverifiable": 422,
+    "not_ready": 422,
     "bad_category": 422,
     "not_found": 404,
 }
+
+# 证据必须**可核验**：至少带一个可追溯的编号（回归报告 R-001、L-6 用例集编号等）。
+# 只写"随便写点什么"等于把禁止项"不允许跳过回归直接改 Prompt"变成空话。
+EVIDENCE_REF = re.compile(r"(?i)(?:\b(?:R|L|V)-\d+|#\d+)")
 
 
 def http_status_for(code: str) -> int:
@@ -170,12 +178,33 @@ class ReleaseService:
             raise ReleaseError("no_change", "本次发布的组件与当前稳定版完全一致，无需发布")
 
         # ---- 4. 证据要求：Agent 变更要回归证据，名单变更要 L-6 风控证据 ----
-        if "agent" in changed and not regression_evidence:
-            raise ReleaseError("regression_required",
-                               "Agent / 提示词变更必须附回归证据（回归报告编号或链接）")
-        if "sanctions" in changed and not risk_evidence:
-            raise ReleaseError("risk_evidence_required",
-                               "名单库变更必须附 L-6 风控回归证据（PRD 13.4.8）")
+        if "agent" in changed:
+            if not regression_evidence:
+                raise ReleaseError("regression_required",
+                                   "Agent / 提示词变更必须附回归证据（回归报告编号或链接）")
+            if not EVIDENCE_REF.search(regression_evidence):
+                raise ReleaseError(
+                    "regression_evidence_unverifiable",
+                    "回归证据必须可核验：写清报告编号（如 R-001、L-6 回归报告），"
+                    "不能只写一句说明 —— 否则等于没跑回归")
+        if "sanctions" in changed:
+            if not risk_evidence:
+                raise ReleaseError("risk_evidence_required",
+                                   "名单库变更必须附 L-6 风控回归证据（PRD 13.4.8）")
+            if not EVIDENCE_REF.search(risk_evidence):
+                raise ReleaseError(
+                    "risk_evidence_unverifiable",
+                    "L-6 风控回归证据必须可核验：写清用例集编号或报告编号"
+                    "（如 L-6 R-002），不能只写一句说明")
+
+        # 目标知识库版本必须**就绪**：灰度到一个"库里没有块"的版本，
+        # 询盘会静默退化成「请补充信息」（草稿里没有价格）——
+        # 台账与审计一切正常，但买家收到的是空话。
+        # 这里要么把该版本补齐（增量灌，不动其它版本），要么拒绝这次发布。
+        target_kb = str(merged.get("kb_version") or "")
+        base_kb = str(base.get("kb_version") or "")
+        if target_kb and target_kb != base_kb:
+            self._ensure_kb_ready(target_kb)
 
         # ---- 5. 发布号不能重复（输入问题先报，再谈状态冲突） ----
         rid = str(release_id or "").strip() or self._next_release_id(now)
@@ -219,6 +248,35 @@ class ReleaseService:
             "risk_evidence": risk_evidence,
         })
         return manifest
+
+    def _kb_ready(self, kb_version: str) -> bool:
+        """该库版本在存储层是否就绪（库里确实有它的块）。"""
+        version = str(kb_version or "")
+        if not version:
+            return True
+        try:
+            return len(self.store.list_kb_chunks(version)) > 0
+        except Exception:
+            return False
+
+    def _ensure_kb_ready(self, kb_version: str) -> None:
+        """确保目标知识库版本就绪：没有块就增量灌入（不动其它版本）。
+
+        灌不进去就直接拒绝这次发布 —— 不让"灰度到一个空版本"这种
+        **台账正常、买家收到空话**的发布过去。
+        """
+        version = str(kb_version or "")
+        if not version or self._kb_ready(version):
+            return
+        try:
+            from ..data.kb_seed import load_kb
+            load_kb(self.store, version, replace=False)
+        except Exception as exc:
+            raise ReleaseError("not_ready",
+                               "知识库版本 %s 未就绪且无法灌入：%s" % (version, exc))
+        if not self._kb_ready(version):
+            raise ReleaseError("not_ready",
+                               "知识库版本 %s 未就绪（库里没有该版本的块）" % version)
 
     # ------------------------------------------------------------ 推进档位
     def advance(self, release_id: str, now: Optional[datetime] = None,
@@ -320,7 +378,11 @@ class ReleaseService:
         否则 → 稳定版（别名）；再否则 → 基线（等于没发布过）。
         """
         canary = self.canary()
-        if canary is not None and in_canary(canary, company, lang):
+        # 兜底：灰度版本的知识库**没就绪**时不进灰度（企业走稳定版）——
+        # 否则灰度企业的询盘会静默退化成「请补充信息」。
+        canary_ok = (canary is not None
+                     and self._kb_ready(canary.components.get("kb_version", "")))
+        if canary_ok and in_canary(canary, company, lang):
             comps = self.stable_components()
             for cat in CATEGORIES:
                 if cat in canary.rolled_back_categories:

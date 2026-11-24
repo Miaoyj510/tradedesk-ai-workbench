@@ -83,8 +83,15 @@ def index_kb(store, embedder: Embedder, kb_version: str,
     return {"indexed": len(todo), "skipped": len(blocks) - len(todo)}
 
 
-def load_index(store, kb_version: str) -> "VectorIndex":
-    """从存储层把向量载入内存索引。"""
+def load_index(store, kb_version: str, index_version: str = "") -> "VectorIndex":
+    """从存储层把向量载入内存索引。
+
+    `index_version` 是**索引版本**（PRD 13.4.8）：块按 `kb_version` 取，
+    向量按 `index_version` 取。默认两者相同；
+    指向另一套**已建好**的索引时，块是新的、向量是旧的 ——
+    这就是"索引版本回滚"，**不需要重建**（避开重建窗口）。
+    """
     from .vector_index import VectorIndex
-    items = [(cid, vec) for cid, _model, vec in store.list_kb_embeddings(kb_version)]
+    ver = index_version or kb_version
+    items = [(cid, vec) for cid, _model, vec in store.list_kb_embeddings(ver)]
     return VectorIndex(items)
