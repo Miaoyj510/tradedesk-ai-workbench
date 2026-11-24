@@ -32,6 +32,7 @@ from ..domain.models import (
     ThreadEvent,
     ThreadState,
 )
+from ..release.manifest import ReleaseManifest
 
 DEFAULT_DSN = "postgresql://tradedesk:tradedesk_local_dev@127.0.0.1:5433/tradedesk"
 
@@ -134,6 +135,20 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_lang ON llm_usage(lang);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_thread ON llm_usage(thread_id);
+
+-- 发布与灰度（S6-3）：发布清单 + 版本别名（按类别回滚靠别名切换）
+CREATE TABLE IF NOT EXISTS releases (
+    release_id  TEXT PRIMARY KEY,
+    payload     JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS release_alias (
+    category    TEXT PRIMARY KEY,
+    release_id  TEXT NOT NULL,
+    components  JSONB NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 
@@ -221,7 +236,8 @@ class PostgresStateStore:
     def reset(self) -> None:
         """清空业务表（验证脚本可重复运行的前提）。"""
         with self.conn.cursor() as cur:
-            cur.execute("TRUNCATE threads, customers, thread_events, audit_log, gate_tokens")
+            cur.execute("TRUNCATE threads, customers, thread_events, audit_log, "
+                        "gate_tokens, releases, release_alias")
 
     # ---------- 演练与验证辅助（生产也可用：篡改演练、令牌过期演练） ----------
     def tamper_audit_payload(self, seq: int, payload: Dict[str, Any]) -> None:
@@ -460,6 +476,64 @@ class PostgresStateStore:
                 return False, e.seq
             prev = e.hash
         return True, None
+
+    # ---------- 发布与灰度（S6-3） ----------
+    def save_release(self, manifest) -> None:
+        """发布清单落库：整份档案存 payload（JSONB），字段演进不需要改表。"""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO releases(release_id, payload, created_at, updated_at) "
+                "VALUES(%s,%s,%s,%s) ON CONFLICT (release_id) DO UPDATE SET "
+                "payload=EXCLUDED.payload, updated_at=EXCLUDED.updated_at",
+                (manifest.release_id,
+                 json.dumps(manifest.model_dump(mode="json"), ensure_ascii=False,
+                           default=_json_default),
+                 manifest.created_at, manifest.updated_at),
+            )
+
+    def get_release(self, release_id: str):
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT payload FROM releases WHERE release_id=%s", (release_id,))
+            row = cur.fetchone()
+        return ReleaseManifest.model_validate(row[0]) if row else None
+
+    def list_releases(self):
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT payload FROM releases ORDER BY created_at, release_id")
+            rows = cur.fetchall()
+        return [ReleaseManifest.model_validate(r[0]) for r in rows]
+
+    def set_release_alias(self, category: str, release_id: str, components) -> None:
+        """版本别名：某类别当前指向哪套组件（回滚就是改这一行）。"""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO release_alias(category, release_id, components, updated_at) "
+                "VALUES(%s,%s,%s, now()) ON CONFLICT (category) DO UPDATE SET "
+                "release_id=EXCLUDED.release_id, components=EXCLUDED.components, "
+                "updated_at=now()",
+                (category, release_id,
+                 json.dumps(dict(components or {}), ensure_ascii=False, default=_json_default)),
+            )
+
+    def get_release_alias(self, category: str):
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT category, release_id, components, updated_at FROM release_alias "
+                "WHERE category=%s", (category,))
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {"category": row[0], "release_id": row[1],
+                "components": row[2], "updated_at": row[3]}
+
+    def list_release_aliases(self):
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT category, release_id, components, updated_at FROM release_alias "
+                "ORDER BY category")
+            rows = cur.fetchall()
+        return {r[0]: {"category": r[0], "release_id": r[1],
+                        "components": r[2], "updated_at": r[3]} for r in rows}
 
     # ---------- 闸门令牌 ----------
     # ---------- 知识库 ----------

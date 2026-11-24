@@ -5,7 +5,8 @@
 """
 from __future__ import annotations
 
-from typing import Optional
+import threading
+from typing import Dict, Optional
 
 from fastapi import Header, HTTPException, Request
 
@@ -18,12 +19,14 @@ from ..config import Config, get_settings
 from ..runtime.gates import GateTokenService
 from ..retrieval.store_retriever import StoreRetriever
 from ..retrieval.indexer import load_index
+from ..release.manifest import baseline_components
+from ..release.service import ReleaseService
 from ..runtime.supervisor import Supervisor
 from ..store.base import StateStore
 from ..store.sqlite_store import SqliteStateStore
 
 
-def build_registry(retriever=None, chat=None) -> Registry:
+def build_registry(retriever=None, chat=None, retriever_factory=None) -> Registry:
     """注册本期两个实现型角色 + 两个仅声明型角色。
 
     `chat` 为云端对话客户端（S5-1a）：为 None 时 Eva 只走模板路径（离线可测）；
@@ -31,7 +34,8 @@ def build_registry(retriever=None, chat=None) -> Registry:
     """
     reg = Registry()
     reg.register(InquiryAgent(retriever=retriever,
-                              writer=ModelDraftWriter(chat) if chat is not None else None))
+                              writer=ModelDraftWriter(chat) if chat is not None else None,
+                              retriever_factory=retriever_factory))
     reg.register(SentinelAgent())
     reg.register_spec(MERCH_SPEC)
     reg.register_spec(GROWTH_SPEC)
@@ -101,6 +105,36 @@ class AppContext:
         # 检索器在嵌入器与向量索引就绪后创建：稠密通道才能接上去（S4-4b）。
         self.retriever = StoreRetriever(self.store, self.kb_version,
                                         embedder=self.embedder, vector_index=self.vector_index)
+        # ---- 灰度检索器工厂（S6-3）----
+        # 同一进程内不同企业可能命中不同的知识库版本 → 检索器**按版本缓存**，不共用一份。
+        # 向量索引按版本加载且**只读**（load_index 不建索引）——建索引是显式动作（dev.ps1 index）。
+        self._retriever_cache: Dict[str, StoreRetriever] = {self.kb_version: self.retriever}
+        self._retriever_lock = threading.Lock()
+
+        def _retriever_factory(kb_version: str) -> StoreRetriever:
+            key = str(kb_version or "")
+            if not key:
+                return self.retriever
+            with self._retriever_lock:
+                cached = self._retriever_cache.get(key)
+            if cached is not None:
+                return cached
+            index = None
+            try:
+                index = load_index(self.store, key)
+            except Exception:
+                index = None
+            built = StoreRetriever(self.store, key, embedder=self.embedder, vector_index=index)
+            with self._retriever_lock:
+                return self._retriever_cache.setdefault(key, built)
+
+        self.retriever_factory = _retriever_factory
+
+        # ---- 发布/灰度服务（S6-3；PRD 13.4.8）----
+        # 基线 = 本机正在跑的这一套（镜像 / AgentSpec / 提示词 / 知识库 / 名单）。
+        # 没有任何发布记录时 resolve() 返回 baseline → 行为与引入灰度之前完全一致。
+        self.release_defaults = baseline_components(self.kb_version, self.config.list_version)
+        self.release_service = ReleaseService(self.store, self.release_defaults)
         # 云端对话客户端（S5-1a）：没 key 时为 None → Eva 自动退回模板路径。
         # `chat` 参数用于测试注入假客户端（不联网、不计费）。
         self.chat = chat if chat is not None else self._build_chat()
@@ -111,7 +145,8 @@ class AppContext:
             print("[deps] 模型出稿未开启（TRADEDESK_LLM_DRAFT_ENABLED=0）：Eva 只走模板路径")
         else:
             print("[deps] 未配云端模型 key（或厂商未配置）：Eva 只走模板路径")
-        self.registry = registry or build_registry(retriever=self.retriever, chat=self.chat)
+        self.registry = registry or build_registry(retriever=self.retriever, chat=self.chat,
+                                                   retriever_factory=self.retriever_factory)
         self.tokens = GateTokenService(store, ttl_seconds=self.config.gate_token_ttl_s)
         self.supervisor = Supervisor(
             store=store, registry=self.registry, token_service=self.tokens,
@@ -121,6 +156,8 @@ class AppContext:
             sla_first_response=self.config.sla_first_response_s,
             sla_quote=self.config.sla_quote_s,
             sla_followup=self.config.sla_followup_s,
+            # 灰度分流（S6-3）：没有发布记录时行为不变
+            release_service=self.release_service,
         )
 
 
@@ -147,7 +184,7 @@ def get_context() -> AppContext:
     """
     cfg = get_settings()
     if cfg.database_url:
-        from .store.postgres_store import PostgresStateStore
+        from ..store.postgres_store import PostgresStateStore
         store = PostgresStateStore(cfg.database_url)
         print("[deps] 使用 PostgreSQL：" + cfg.database_url.split("@")[-1])
     else:

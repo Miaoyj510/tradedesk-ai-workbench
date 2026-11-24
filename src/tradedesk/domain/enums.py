@@ -81,3 +81,4 @@ class EventType(str, Enum):
     SIGNED_OFF = "signed_off"
     SENT = "sent"
     HUMAN_TAKEOVER = "human.takeover"
+    RELEASE_ASSIGNED = "release.assigned"   # 本条询盘被分流到哪个发布版本（S6-3）

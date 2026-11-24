@@ -69,7 +69,8 @@ class Supervisor:
                  amount_threshold: float = 5000.0,
                  sla_first_response: Optional[int] = None,
                  sla_quote: Optional[int] = None,
-                 sla_followup: Optional[int] = None) -> None:
+                 sla_followup: Optional[int] = None,
+                 release_service=None) -> None:
         self.store = store
         self.registry = registry
         self.tokens = token_service or GateTokenService(store)
@@ -79,6 +80,8 @@ class Supervisor:
         self.sla_first_response = sla_first_response if sla_first_response is not None else SLA_DEFAULTS["first_response"]
         self.sla_quote = sla_quote if sla_quote is not None else SLA_DEFAULTS["quote"]
         self.sla_followup = sla_followup if sla_followup is not None else SLA_DEFAULTS["followup"]
+        # 发布/灰度服务（S6-3）：为 None = 不做灰度分流，行为与原来完全一致。
+        self.release_service = release_service
         # 草稿暂存内存（S2 未做草稿持久化；S4 接真检索后改为随事件落库）
         self.drafts: Dict[str, Draft] = {}
         # 线程号自增（并发下唯一）
@@ -204,6 +207,27 @@ class Supervisor:
         # 客户档案跨线程共享（PRD 8.3）：登记本线程、累积历史要点
         self._sync_customer_profile(buyer_id, profile, thread, message)
 
+        # ---- 灰度分流（S6-3；PRD 13.4.8）----
+        # 同一企业必须永远命中同一个版本：分桶是纯函数，不需要存分流表。
+        # 没有任何发布记录时 source = "baseline"，**不产生额外事件** ——
+        # 没启用灰度的部署，行为与引入灰度之前完全一致。
+        effective = None
+        if self.release_service is not None:
+            try:
+                effective = self.release_service.resolve(profile["company"], language.value)
+            except Exception as exc:
+                print(f"[supervisor] 灰度分流失败，回落稳定版：{exc}")
+                effective = None
+            if effective is not None and effective.source != "baseline":
+                self._log(thread.thread_id, EventType.RELEASE_ASSIGNED,
+                          {"release_id": effective.release_id, "source": effective.source,
+                           "kb_version": effective.components.get("kb_version", ""),
+                           "company": profile["company"], "language": language.value})
+                self._audit("system", "release.assign", thread.thread_id,
+                            {"release_id": effective.release_id, "source": effective.source,
+                             "kb_version": effective.components.get("kb_version", ""),
+                             "company": profile["company"]})
+
         # Prompt 注入检测（PRD 8.9）：买家消息是数据，不是指令
         injection = detect_injection(message)
         if injection:
@@ -314,8 +338,15 @@ class Supervisor:
         inquiry = self.registry.get("inquiry.reply")
         if inquiry is None:
             raise RuntimeError("Inquiry 未注册")
+        # 检索上下文带上**发布版本**（S6-3）：Eva 按版本取检索器，
+        # 灰度企业与稳定企业因此可能读到不同的知识库快照（这正是灰度要验的东西）。
+        inquiry_context: Dict[str, Any] = {"customer": profile}
+        if effective is not None:
+            kb_version = str(effective.components.get("kb_version") or "")
+            if kb_version:
+                inquiry_context["kb_version"] = kb_version
         result = inquiry.handle(AgentRequest(thread=thread, message=message,
-                                             language=language, context={"customer": profile}))
+                                             language=language, context=inquiry_context))
         draft = result.draft
         assert draft is not None
         self.drafts[thread.thread_id] = draft
