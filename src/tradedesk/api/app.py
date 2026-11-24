@@ -67,6 +67,28 @@ class AdvanceBody(BaseModel):
     to_stage: str
 
 
+class ReleaseCreateBody(BaseModel):
+    """建发布请求体（S6-3）。
+
+    components **只填要改的组件**：没填的沿用当前稳定版，不会被隐性回退。
+    审批三件套（审批人 / 变更说明 / 回滚预案）必填，否则服务端直接拒。
+    """
+    components: Dict[str, str] = Field(default_factory=dict)
+    approver: str = ""
+    change_notes: str = ""
+    rollback_plan: str = ""
+    regression_evidence: str = ""
+    risk_evidence: str = ""
+    pilot_companies: List[str] = Field(default_factory=list)
+    langs: List[str] = Field(default_factory=list)
+    release_id: str = ""
+
+
+class ReleaseRollbackBody(BaseModel):
+    release_id: str
+    category: str
+
+
 def mount_ui(app: FastAPI) -> bool:
     """把前端原型托管在 `/ui`（S6-2）。
 
@@ -298,6 +320,107 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
         """
         from .auth import role_catalog
         return role_catalog()
+
+    # ------------------------------------------------------------ 发布与灰度（S6-3）
+    def _release_service():
+        return app.state.ctx.release_service
+
+    def _release_guard(x_session_token: str, body_approver: str = ""):
+        """发布写操作的权限与审批人（S6-3 越权闸门）。
+
+        两条规矩：
+
+        1. **审批人不得由请求体自称**。鉴权开启时审批人只能取自会话用户 ——
+           否则谁都能自称"经理"把发布批了。
+        2. **角色要有 `release` 能力**才能建发布 / 推进档位 / 回滚。
+
+        本地演示默认**不强制鉴权**（没有身份体系）：这时审批人仍须由请求体给出 ——
+        宁可让人多写一个字段，也不给一个假的默认审批人。
+        """
+        from .auth import auth_required, has_capability, session_user
+        if not auth_required():
+            return (body_approver or "").strip(), None
+        user = session_user(x_session_token)
+        if user is None:
+            return "", HTTPException(
+                status_code=401,
+                detail={"code": "not_authenticated", "message": "请先登录"})
+        if not has_capability(user, "release"):
+            return "", HTTPException(
+                status_code=403,
+                detail={"code": "forbidden",
+                        "message": "当前角色没有发布权限（建发布 / 推进档位 / 回滚）"})
+        return str(user.get("username") or user.get("name") or ""), None
+
+    def _release_error(exc):
+        from ..release.service import http_status_for
+        return HTTPException(status_code=http_status_for(exc.code),
+                             detail={"code": exc.code, "message": exc.message})
+
+    @app.get("/release/status")
+    def release_status() -> Dict[str, Any]:
+        """发布台账：基线组件、当前稳定版、全部发布与版本别名。"""
+        return _release_service().status()
+
+    @app.get("/release/resolve")
+    def release_resolve(company: str = "", lang: str = "") -> Dict[str, Any]:
+        """一次询盘实际命中哪一版（按企业分桶，语种可限定）。"""
+        eff = _release_service().resolve(company, lang)
+        return {"company": company, "lang": lang, "source": eff.source,
+                "release_id": eff.release_id, "components": eff.components}
+
+    @app.post("/release")
+    def release_create(body: ReleaseCreateBody,
+                       x_session_token: str = Header(default="")) -> Dict[str, Any]:
+        """建一次灰度发布（审批人 / 变更说明 / 回滚预案必填）。"""
+        from ..release.service import ReleaseError
+        approver, denied = _release_guard(x_session_token, body.approver)
+        if denied is not None:
+            raise denied
+        try:
+            manifest = _release_service().create(
+                components=body.components,
+                approver=approver,
+                change_notes=body.change_notes,
+                rollback_plan=body.rollback_plan,
+                regression_evidence=body.regression_evidence,
+                risk_evidence=body.risk_evidence,
+                pilot_companies=body.pilot_companies,
+                langs=body.langs,
+                release_id=body.release_id or None,
+                actor=approver)
+        except ReleaseError as exc:
+            raise _release_error(exc)
+        return manifest.model_dump(mode="json")
+
+    @app.post("/release/{release_id}/advance")
+    def release_advance(release_id: str,
+                        x_session_token: str = Header(default="")) -> Dict[str, Any]:
+        """推进一档（PILOT → P20 → P50 → P100）；观察窗没到会拒绝。"""
+        from ..release.service import ReleaseError
+        approver, denied = _release_guard(x_session_token)
+        if denied is not None:
+            raise denied
+        try:
+            manifest = _release_service().advance(release_id, actor=approver)
+        except ReleaseError as exc:
+            raise _release_error(exc)
+        return manifest.model_dump(mode="json")
+
+    @app.post("/release/rollback")
+    def release_rollback(body: ReleaseRollbackBody,
+                         x_session_token: str = Header(default="")) -> Dict[str, Any]:
+        """按类别回滚：app / agent / knowledge / sanctions 互不影响。"""
+        from ..release.service import ReleaseError
+        approver, denied = _release_guard(x_session_token)
+        if denied is not None:
+            raise denied
+        try:
+            manifest = _release_service().rollback(
+                body.release_id, body.category, actor=approver)
+        except ReleaseError as exc:
+            raise _release_error(exc)
+        return manifest.model_dump(mode="json")
 
     # ------------------------------------------------------------ 前端静态托管（S6-2）
     mount_ui(app)

@@ -30,6 +30,7 @@ from ..domain.models import (
     ThreadEvent,
     ThreadState,
 )
+from ..release.manifest import ReleaseManifest
 
 SCHEMA_VERSION = 1
 
@@ -140,6 +141,20 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 );
 CREATE INDEX IF NOT EXISTS idx_llm_usage_lang ON llm_usage(lang);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_thread ON llm_usage(thread_id);
+
+-- 发布与灰度（S6-3）：发布清单 + 版本别名（按类别回滚靠别名切换）
+CREATE TABLE IF NOT EXISTS releases (
+    release_id  TEXT PRIMARY KEY,
+    payload     TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS release_alias (
+    category    TEXT PRIMARY KEY,
+    release_id  TEXT NOT NULL,
+    components  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
 """
 
 
@@ -359,7 +374,8 @@ class SqliteStateStore:
         with self._write_lock:
             self._conn.executescript(
                 "DELETE FROM threads; DELETE FROM customers; DELETE FROM thread_events; "
-                "DELETE FROM audit_log; DELETE FROM gate_tokens;"
+                "DELETE FROM audit_log; DELETE FROM gate_tokens; "
+                "DELETE FROM releases; DELETE FROM release_alias;"
             )
             self._conn.commit()
 
@@ -587,6 +603,60 @@ class SqliteStateStore:
                 return False, e.seq
             prev = e.hash
         return True, None
+
+    # ---------- 发布与灰度（S6-3） ----------
+    def save_release(self, manifest) -> None:
+        """发布清单落库：整份档案存 payload，字段演进不需要改表。"""
+        with self._write_lock:
+            self._conn.execute(
+                "INSERT INTO releases(release_id, payload, created_at, updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(release_id) DO UPDATE SET payload=excluded.payload, "
+                "updated_at=excluded.updated_at",
+                (manifest.release_id, _dumps(manifest.model_dump(mode="json")),
+                 manifest.created_at.isoformat(), manifest.updated_at.isoformat()),
+            )
+            self._conn.commit()
+
+    def get_release(self, release_id: str):
+        row = self._conn.execute(
+            "SELECT payload FROM releases WHERE release_id=?", (release_id,)).fetchone()
+        return ReleaseManifest.model_validate_json(row["payload"]) if row else None
+
+    def list_releases(self):
+        rows = self._conn.execute(
+            "SELECT payload FROM releases ORDER BY created_at, release_id").fetchall()
+        return [ReleaseManifest.model_validate_json(r["payload"]) for r in rows]
+
+    def set_release_alias(self, category: str, release_id: str, components) -> None:
+        """版本别名：某类别当前指向哪套组件（回滚就是改这一行）。"""
+        with self._write_lock:
+            self._conn.execute(
+                "INSERT INTO release_alias(category, release_id, components, updated_at) "
+                "VALUES(?,?,?,?) ON CONFLICT(category) DO UPDATE SET "
+                "release_id=excluded.release_id, components=excluded.components, "
+                "updated_at=excluded.updated_at",
+                (category, release_id, _dumps(dict(components or {})),
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def get_release_alias(self, category: str):
+        row = self._conn.execute(
+            "SELECT category, release_id, components, updated_at FROM release_alias "
+            "WHERE category=?", (category,)).fetchone()
+        if not row:
+            return None
+        return {"category": row["category"], "release_id": row["release_id"],
+                "components": json.loads(row["components"]),
+                "updated_at": row["updated_at"]}
+
+    def list_release_aliases(self):
+        rows = self._conn.execute(
+            "SELECT category, release_id, components, updated_at FROM release_alias "
+            "ORDER BY category").fetchall()
+        return {r["category"]: {"category": r["category"], "release_id": r["release_id"],
+                                "components": json.loads(r["components"]),
+                                "updated_at": r["updated_at"]} for r in rows}
 
     # ---------- 闸门令牌 ----------
     def issue_gate_token(self, token: GateToken) -> None:

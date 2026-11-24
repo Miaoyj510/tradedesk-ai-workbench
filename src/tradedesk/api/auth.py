@@ -52,7 +52,9 @@ ROLES: List[Dict[str, Any]] = [
         "desc": "在业务员之上：看得到内部成本区间，并可对低风险草稿批量签核（PRD FR-HUM-10）。",
         "views": ["threads", "conversation", "draft", "citations", "evidence", "gates", "signoff", "batch"],
         "price_fields": ["reference_price", "internal_cost"],
-        "can": ["sign_off", "send", "advance_stage", "batch_signoff"],
+        # "release"：发布管理权（建发布 / 推进灰度档位 / 回滚）——
+        # 只有承担发布责任的岗位才有，业务员不代劳（S6-3 越权闸门）。
+        "can": ["sign_off", "send", "advance_stage", "batch_signoff", "release"],
     },
     {
         "id": "compliance",
@@ -193,6 +195,17 @@ def _public_user(s: Dict[str, Any]) -> Dict[str, Any]:
         "price_fields": role["price_fields"],
         "can": role["can"],
     }
+
+
+def has_capability(user: Optional[Dict[str, Any]], capability: str) -> bool:
+    """会话用户是否具备某项能力（`can` 列表）。
+
+    写操作前的角色闸门用它：能力不在角色目录里 → 不许做。
+    能力名与 `ROLES[].can` 一一对应，改角色表即改权限，不必改业务代码。
+    """
+    if not user:
+        return False
+    return capability in (user.get("can") or [])
 
 
 def role_catalog() -> Dict[str, Any]:

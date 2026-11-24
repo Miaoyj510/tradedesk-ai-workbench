@@ -33,6 +33,10 @@ from typing import Dict, Iterable, List, Optional
 
 from ..domain.enums import Intent, Language
 
+# 提示词资产版本（S6-3 灰度用）：
+# 改提示词 = 改版本号 = agent 类别变更 → 必须附回归证据才能发布。
+PROMPT_VERSION = "1.0.0"
+
 # ---- 占位符（模型唯一能看到的事实形式） ----
 PLACEHOLDER_SKU = "{{sku}}"
 PLACEHOLDER_MOQ = "{{moq}}"

@@ -149,17 +149,36 @@ class InquiryAgent(BaseAgent):
     没有检索器时退回旧的本地匹配（仅兜底，便于单测）。
     """
 
-    def __init__(self, retriever=None, writer=None) -> None:
+    def __init__(self, retriever=None, writer=None, retriever_factory=None) -> None:
         super().__init__(INQUIRY_SPEC)
         self.retriever = retriever
         # 模型出稿执行器（S5-1a）：为 None 则只走模板路径（离线可测）。
         self.writer = writer
+        # 检索器工厂（S6-3 灰度）：按本次询盘命中的**发布版本**取检索器 ——
+        # 同一进程里不同企业可能正在用不同的知识库版本，检索器必须按版本选，不能全局一份。
+        self.retriever_factory = retriever_factory
 
     # ---- 证据装配 ----
     # R11-05 / R11-06：**不再有"写死常量"这条兜底路径**。
     # 知识库是价格、规格、证书的唯一真源：检索没确认产品就只发追问，宁可少答一句，
     # 也不猜型号与报价。旧兜底会报出 S1 时代的 "SKU X-200 v1" —— 那个标识在知识库里
     # 查不到，等于给买家一条断链的引用。
+
+    def _retriever_for(self, request):
+        """按本次询盘命中的发布版本选检索器（S6-3 灰度）。
+
+        没有发布信息 → 用默认检索器；工厂异常 → 也退回默认检索器
+        （检索降级比停服好；分流结果在事件流与审计里留痕）。
+        """
+        if self.retriever_factory is None:
+            return self.retriever
+        kb_version = str((request.context or {}).get("kb_version") or "")
+        if not kb_version:
+            return self.retriever
+        try:
+            return self.retriever_factory(kb_version) or self.retriever
+        except Exception:
+            return self.retriever
 
     # ---- 检索取证（S3）----
     def _retrieve(self, request: AgentRequest):
@@ -170,7 +189,8 @@ class InquiryAgent(BaseAgent):
           命中列表 —— 证据（证书、法规、术语、产品块）
           规格记录 —— 数值的唯一真源（价格/交期/MOQ/负荷）
         """
-        if self.retriever is None:
+        retriever = self._retriever_for(request)
+        if retriever is None:
             return None, [], None
         profile = request.context.get("customer") or {}
         country = str(profile.get("country", "") or "")
@@ -181,7 +201,7 @@ class InquiryAgent(BaseAgent):
             today=date.today(),
             top_k=8,
         )
-        hits = list(self.retriever.search(query))
+        hits = list(retriever.search(query))
         # 只有**结构化通道**（型号/证书号等精确命中）确认的产品才能进草稿。
         # 词法通道命中的产品只说明"这类产品可能相关"，不足以据此报具体型号的价格与交期。
         product = self._pick_product(hits, request.language.value)
@@ -189,7 +209,7 @@ class InquiryAgent(BaseAgent):
             return None, hits, None
         sku = str(product.identifiers.get("sku", ""))
         # 数值只从**结构化规格记录**取（数值的唯一真源）
-        spec = self._fetch_spec(sku, country, request.language.value) if sku else None
+        spec = self._fetch_spec(sku, country, request.language.value, retriever) if sku else None
         # 回查到的块可能已在原始命中里（每家问“CE certificate”时词法就命中了它）
         # —— 直接 append 会让同一张证书在引用列表里出现两次（R14-01），按 chunk_id 去重。
         seen_chunks = {h.chunk.chunk_id for h in hits}
@@ -207,7 +227,7 @@ class InquiryAgent(BaseAgent):
         cert_nos = ((spec.extra.get("certificates") if spec is not None else None)
                     or product.extra.get("certificates") or [])
         for cert_no in cert_nos:
-            _add(self._fetch_cert(str(cert_no), country, request.language.value))
+            _add(self._fetch_cert(str(cert_no), country, request.language.value, retriever))
         return product, hits, spec
 
     @staticmethod
@@ -222,21 +242,23 @@ class InquiryAgent(BaseAgent):
                 return c
         return cands[0]
 
-    def _fetch_spec(self, sku: str, country: str, lang: str):
+    def _fetch_spec(self, sku: str, country: str, lang: str, retriever=None):
         """按型号取结构化规格记录（数值的唯一真源）。"""
+        retriever = retriever or self.retriever
         # 按**标识**取规格记录，不需要语义 → 不走稠密通道（节省一次云端调用）
         query = SearchQuery(text=sku, lang=lang, buyer_country=country,
                             today=date.today(), top_k=5, use_dense=False)
-        for h in self.retriever.search(query):
+        for h in retriever.search(query):
             if h.chunk.doc_type == "产品规格" and h.chunk.identifiers.get("sku") == sku:
                 return h.chunk
         return None
 
-    def _fetch_cert(self, cert_no: str, country: str, lang: str):
+    def _fetch_cert(self, cert_no: str, country: str, lang: str, retriever=None):
         """按证书号精确回查证书块（证书不按买家国别过滤，FR-KB-06）。"""
+        retriever = retriever or self.retriever
         query = SearchQuery(text=cert_no, lang=lang, buyer_country=country,
                             today=date.today(), top_k=3, use_dense=False)
-        for h in self.retriever.search(query):
+        for h in retriever.search(query):
             if h.chunk.doc_type == "证书" and h.chunk.identifiers.get("cert_no") == cert_no:
                 return h.chunk
         return None

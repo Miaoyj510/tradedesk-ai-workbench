@@ -12,7 +12,7 @@
 | **S3** | Sentinel 名单核验 + Inquiry 草稿装配 + 检索骨架 | ✅ 已完成（R11/R12/R14 审核 → R13/R16 修复） | `python scripts/verify_s3.py`（52 项）+ `dev.ps1 audit3`（90 项） |
 | **S4** | 检索层：词法 + 结构化 + 稠密三通道 RRF（BGE-M3 / pgvector 可替换）+ 评测基线 | ✅ 已完成（R15/R17 审核 → R16/R18 修复；语料扩量见 `docs/NEXT.md` S4-4c 续） | `python scripts/verify_s4.py`（60 项）+ `dev.ps1 audit4`（SQLite 78 / PG 85 项） |
 | **S5** | 多云厂商 provider 层（5 家）+ 真模型出稿 + 成本落库 + 分语种评测 | ✅ 已完成（R19 审核 → R20 修复） | `python scripts/verify_s5.py`（离线 18 项）+ `dev.ps1 audit5`（54 项） |
-| **S6** | 前端联调 + 镜像构建 + 灰度回滚 | 🔶 进行中：S6-1a/1b 接真数据、S6-2 镜像、S6-4 登录已交卷（R21 审核 → 已修完）；**S6-3 灰度回滚未开始** | `python scripts/verify_s6.py`（Python 24 + Node 27 项）+ `dev.ps1 audit6`（49 + 渲染层 15 项） |
+| **S6** | 前端联调 + 镜像构建 + 灰度回滚 | ✅ 五个切片全部交卷（1a / 1b / 2 / 3 / 4；S6-3 待审核核验） | `python scripts/verify_s6.py`（Python 24 + Node 27 项）+ `dev.ps1 audit6`（49 + 渲染层 15 项）+ `python scripts/verify_s6_3.py`（75 项 × 双后端） |
 
 ## 本机环境（已实测）
 
@@ -30,11 +30,12 @@
 $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 
 & $dev up        # 起 PostgreSQL 16(5433) + Redis 7(6380)
-& $dev check     # 交付前自检（十一步）：语法 + S1 双后端 + S2/S3 自证 + pytest + S2…S6 独立审核
+& $dev check     # 交付前自检（十三步）：语法 + S1 双后端 + S2/S3 自证 + pytest + S2…S6/S6-3 独立审核
 & $dev verify    # 双后端验证（S1，53 项 × 2）
-& $dev test      # pytest（234 项）
+& $dev test      # pytest（257 项）
 & $dev status    # 看容器与端口
 & $dev push      # 推送当前分支到 GitHub（git 优先，失败自动切 API）
+& $dev release   # 发布与灰度命令行（status / create / advance / rollback / resolve）
 & $dev down      # 停容器
 
 & $dev verify -Backend postgres   # 只跑 Postgres 后端
@@ -89,7 +90,7 @@ $docker = "C:\Users\DELL\AppData\Local\Programs\DockerDesktop\resources\bin\dock
 1. **所有 `.ps1` 必须存成 UTF-8 with BOM**。Windows PowerShell 5.1（你终端里的那个）会把无 BOM 的脚本按 GBK 读，中文乱码 → 整段语法解析失败。PowerShell 7 无所谓，但为了两端一致，统一带 BOM。
 2. **Python 脚本不要强制 UTF-8 输出**。`verify_s1.py` 已改成自适应：交互式控制台沿用控制台原生编码（中文 Windows 是 GBK/CP936，终端里显示正常），被重定向或抓取时才用 UTF-8。
 
-> 交付前自检：在 **Windows PowerShell 5.1** 下跑 `& $dev check`，十一步全绿再交付。
+> 交付前自检：在 **Windows PowerShell 5.1** 下跑 `& $dev check`，十三步全绿再交付。
 > 验证方式：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<项目>\dev.ps1" check`
 ### 发布到 GitHub
 

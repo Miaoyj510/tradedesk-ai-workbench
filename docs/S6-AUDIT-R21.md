@@ -394,3 +394,45 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 ```bash
 python scripts/audit_s6.py            # 会自动起临时后端并调起 node
 ```
+
+## 六、复核结论（R21 修完后，审核方独立复核）
+
+**复核对象**：`agent-a @ 92bb7d1`（R21: S6 审核 12 个根因全修完）→ `4ba8194`。
+**复核方式**：① 重跑审核断言（两后端）；② **逐条人工看修法**（不信"断言绿"）；
+③ 核对审核断言本身有没有被削弱。
+
+| 项 | 结果 |
+| --- | --- |
+| `dev.ps1 audit6`（SQLite） | **46 PASS / 0 FAIL / 3 NOTE**（原 35/11 → 现 46/0） |
+| `dev.ps1 audit6 -Dsn <PG>` | **47 PASS / 0 FAIL / 2 NOTE**；§S6-G 跨后端读模型逐条一致 |
+| 渲染层（`audit_s6_ui.js`） | **15 PASS / 0 FAIL**（原 3/12 → 现 15/0） |
+| 审核断言是否被削弱 | **未被削弱**：`git diff 9e2a603 4ba8194 -- scripts/audit_s6.py scripts/audit_s6_ui.js` 只改一处，且是**变严**（`r"\.wait"` → `r"\.wait\b"`，原正则里的 0x08 控制字符导致任何代码都匹配不上 —— 实现方称之为"修坏字节"，属实） |
+| 人工复核 12 条修法 | 全部**修到位**，且不是"改断言让它变绿" |
+
+人工复核要点（逐条看 diff，不是看断言）：
+
+- **R21-01（XSS）**：`x.text` 与 `d.body` 都改成了 `esc(...)`，且注释写明"要保留换行就用 CSS
+  `white-space:pre-wrap`，不要用 `<br>` 拼接未转义内容" —— 修法对，不是打补丁。
+- **R21-02（CN-2211）**：新增 `blockedEntryId(t)`，只从 `t.evidence` 里取 `CN-\d+`，
+  取不到就显示"（条目 ID 未在证据链中给出）"，**不再写死**。
+- **R21-03（mock 残留）**：根因找对了 —— 原来是 `Object.assign({}, D, live)` 把 mock 独有字段
+  （pipeline / gates / riskEvents / kbAssets / terms）原样留在 `D` 里。改法是
+  **api 模式不合并 mock**（`D = currentSource === 'api' ? live : ...`）—— 修的是根因，不是删渲染。
+- **R21-04（固定译文）**：`zh` 只在 mock 模式取；api 模式后端没给译文就不显示那一行。
+- **R21-05（成本分母）**：后端新增 `thread_count`（**distinct thread_id**），
+  `by_lang` / `by_day` 各自按语种/按天去重线程数，**调用次数单独给 `calls` 列**；
+  SQLite 与 PostgreSQL 两边的 SQL 都补了 `SELECT thread_id`（少这一列 `thread_count` 恒为 0）。
+- **R21-06 / R21-07**：`draftReady` 改为"真正有草稿正文"的线程数；`sent` 变量改名 `sent_count`，
+  循环内改用 `sent_ev`，遮蔽消除。
+- **R21-08**：`budget: 2.4` 换成 `costHardCapPerInquiry: 0.2` + `costUnit: "元/条询盘"`
+  —— 改成**能自证**的写法，不再给无出处的常量。
+- **R21-09 / R21-10**：读模型 `notes` 渲染到数据来源标识旁；库版本改从读模型取。
+- **R21-11**：`filters` 增加 `wait`，三档（<30 / 30~240 / >240 分钟）。
+- **R21-12**：`config.js` 改为同源托管口径（不再承诺无 CORS 的跨地址用法）；
+  `_fmt_when()` 给出"今天 / 昨天 / MM-DD HH:MM"三档相对日期。
+
+**另：实现方顺手补上了本轮我指出的两个"自证盲区"后果** ——
+approve 分支现在带 `body`（业务员在界面上改过的草稿不再被静默丢弃），
+`transfer` 动作在真数据模式下可执行（FR-HUM-06 四种动作齐了）。
+
+**结论：R21 的 12 个根因已全部修完并复核通过。** `dev.ps1 audit6` 已挂回 `check` 第十一步。
