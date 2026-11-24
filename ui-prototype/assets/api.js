@@ -117,5 +117,25 @@ window.TDApi = (function () {
     return await req('/inbound', { method: 'POST', body: payload });
   }
 
-  return { loadWorkbench, kbSearch, gateToken, signoff, send, inbound, scenarios: SCENARIOS, req: req };
+  /* 知识库导入（S6-5）：CSV/JSON → 新库版本 → 显式建索引。 */
+  async function kbImport(payload) {
+    return await req('/kb/import', { method: 'POST', body: payload });
+  }
+
+  async function kbVersions() {
+    return await req('/kb/versions');
+  }
+
+  async function kbIndexVersion(version) {
+    return await req('/kb/versions/' + encodeURIComponent(version) + '/index', { method: 'POST' });
+  }
+
+  /* 角色契约（AgentSpec）：侧栏点 Agent 就看这个。
+     真实数据模式从后端取；mock 模式用 data.js 里的静态副本。 */
+  async function loadAgents() {
+    return await req('/agents');
+  }
+
+  return { loadWorkbench, kbSearch, gateToken, signoff, send, inbound, loadAgents,
+           kbImport, kbVersions, kbIndexVersion, scenarios: SCENARIOS, req: req };
 })();

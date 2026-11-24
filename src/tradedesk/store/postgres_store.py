@@ -584,6 +584,17 @@ class PostgresStateStore:
             for r in rows
         ]
 
+    def list_kb_versions(self) -> List[Dict[str, Any]]:
+        """所有库版本及其块数 / 向量数（知识库导入页的版本清单）。"""
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT kb_version, COUNT(*) FROM kb_chunks GROUP BY kb_version")
+            chunks = {r[0]: r[1] for r in cur.fetchall()}
+            cur.execute("SELECT kb_version, COUNT(*) FROM kb_embeddings GROUP BY kb_version")
+            vectors = {r[0]: r[1] for r in cur.fetchall()}
+        return [{"kb_version": v, "chunks": int(chunks.get(v, 0)),
+                 "vectors": int(vectors.get(v, 0))}
+                for v in sorted(set(chunks) | set(vectors))]
+
     def get_kb_chunk(self, chunk_id, kb_version=None):
         """按块 ID 取块；给了 kb_version 就精确到那一个版本。
 

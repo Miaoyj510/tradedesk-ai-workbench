@@ -31,17 +31,17 @@
       <a href="knowledge.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-2z"/><path d="M8 3v18"/></svg>知识库与检索</a>
 
       <div class="rail-label" style="margin-top:16px">Agent</div>
-      <button type="button"><span class="dot dot-live" aria-hidden="true"></span>Inquiry 询盘应答<span class="count">在线</span></button>
-      <button type="button"><span class="dot dot-live" aria-hidden="true"></span>Sentinel 交易风控<span class="count">在线</span></button>
-      <button type="button"><span class="dot dot-decl" aria-hidden="true"></span>Merch 商品运营<span class="count">仅声明</span></button>
-      <button type="button"><span class="dot dot-decl" aria-hidden="true"></span>Growth 推广<span class="count">仅声明</span></button>
+      <button type="button" data-agent-id="inquiry.reply" aria-haspopup="dialog" title="查看角色契约"><span class="dot dot-live" aria-hidden="true"></span>Inquiry 询盘应答<span class="count">在线</span></button>
+      <button type="button" data-agent-id="sentinel.risk" aria-haspopup="dialog" title="查看角色契约"><span class="dot dot-live" aria-hidden="true"></span>Sentinel 交易风控<span class="count">在线</span></button>
+      <button type="button" data-agent-id="merch.listing" aria-haspopup="dialog" title="查看角色契约"><span class="dot dot-decl" aria-hidden="true"></span>Merch 商品运营<span class="count">仅声明</span></button>
+      <button type="button" data-agent-id="growth.campaign" aria-haspopup="dialog" title="查看角色契约"><span class="dot dot-decl" aria-hidden="true"></span>Growth 推广<span class="count">仅声明</span></button>
     </nav>
 
     <div class="rail-foot">
       <div class="agent-chip"><span class="dot dot-live" aria-hidden="true"></span><span>本地 Docker · 云端模型 API</span></div>
       <div style="margin-top:6px" id="current-user">当前用户：<b>—</b></div>
       <div style="margin-top:4px"><button type="button" class="signout" id="signout">切换身份</button></div>
-      <div style="margin-top:2px">版本 v1.0 · 本地 Demo</div>
+      <div style="margin-top:2px">版本 v1.0.1 · 本地 Demo</div>
     </div>
   </aside>
 

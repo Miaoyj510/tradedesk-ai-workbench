@@ -3,6 +3,51 @@
 > 配套文档：`PRD-外贸业务员的AI数字员工工作台-v1.0.md`（产品需求，14 章）
 > 前端原型：`ui-prototype/`（四页可交互原型：登录 / 工作台 / 看板 / 知识库；双击 `index.html` 看 mock 模式，`dev.ps1 serve` 后访问 `/ui/` 看真数据模式）
 
+## 这是什么
+
+**给中小外贸团队的 AI 数字员工工作台** —— 询盘应答（**Inquiry**）与交易风控（**Sentinel**）做成 Agent，
+商品运营（Merch）、推广（Growth）本期**只做角色声明**；客户背调是任务，不是独立角色。
+业务员只做**价格谈判与合同确认**。本仓库交付其中三条的**可运行实现**：
+询盘应答 Agent（Inquiry）+ 多语种知识库、交易风控 Agent（Sentinel）+ 人工签核闸门、调度器路由与询盘线程状态机。
+
+> 红线：**询盘自动应答、报价人工签核、合同必须人工确认**。写操作与发送分离，Agent 只产出草稿。
+
+| 询盘工作台（三语真数据） | 运营看板（门槛口径） | 知识库与检索（跨语种召回） |
+| --- | --- | --- |
+| ![](docs/screenshots/ui_01_workbench.png) | ![](docs/screenshots/ui_02_dashboard.png) | ![](docs/screenshots/ui_03_knowledge.png) |
+
+## 三个关键点
+
+1. **AI 出草稿，不做决定** —— 11 条闸门 + 一次性闸门令牌绑定写操作；人签核后才发得出去。
+2. **外贸最难的不是模型，是时间与确定性** —— 跨天跨周的 8 状态长事务（询盘 → 样品 → 报价 → 订单 → 单证 → 收款），
+   断点续传 + 幂等 + 乐观锁；灰度**按企业**分流，同一买家永远拿到同一版本（按请求随机在报价场景是事故）。
+3. **能被证伪才算数** —— 公开检索基准只做"多语种检索管线体检"，询盘场景另用自建多语种语料单独评测；
+   厂商数字一律标注"厂商自述口径"，不与自建结果混算。
+
+## 证据（都可复跑）
+
+| 项 | 数字 |
+| --- | --- |
+| 交付门禁 | **十三步全绿**（`dev.ps1 check`：双后端 + 独立审核） |
+| 单元测试 | **262 项** |
+| 自证脚本（双后端） | S1 53 / S2 97 / S3 52 / S4 60 / S5 28 / S6-3 91 |
+| 独立审核脚本（双后端） | S2 106 / S3 90 / S4 85 / S5 54 / S6 64 / S6-3 67 |
+| 代码规模 | 源码 9.7k · 验证与审核脚本 10.1k · 单测 3.1k · 前端 2.4k · 文档 5k |
+
+**实现被一份"先于实现写定"的判据证伪过三轮，共修 11 个根因**（含：灰度档把试点企业静默踢出、
+双索引因单列主键根本不成立、审批人可由请求体自称、任何角色都能建发布）—— 修复记录见
+[docs/S6-FIX-R22.md](docs/S6-FIX-R22.md)。
+
+## 快速开始
+
+```powershell
+& ".\dev.ps1" up      # PostgreSQL 16 + Redis 7（Docker）
+& ".\dev.ps1" serve   # http://127.0.0.1:8080/ui/   演示账号：sales / demo1234
+& ".\dev.ps1" check   # 十三步交付门禁
+```
+
+> 作品集材料：[一页纸](docs/PORTFOLIO.md) · [架构图](docs/ARCHITECTURE.md) · [3 分钟演示脚本](docs/DEMO-SCRIPT.md)
+
 ## 当前进度
 
 | 切片 | 内容 | 状态 | 验证方式 |
@@ -12,6 +57,7 @@
 | **S3** | Sentinel 名单核验 + Inquiry 草稿装配 + 检索骨架 | ✅ 已完成（R11/R12/R14 审核 → R13/R16 修复） | `python scripts/verify_s3.py`（52 项）+ `dev.ps1 audit3`（90 项） |
 | **S4** | 检索层：词法 + 结构化 + 稠密三通道 RRF（BGE-M3 / pgvector 可替换）+ 评测基线 | ✅ 已完成（R15/R17 审核 → R16/R18 修复；语料扩量见 `docs/NEXT.md` S4-4c 续） | `python scripts/verify_s4.py`（60 项）+ `dev.ps1 audit4`（SQLite 78 / PG 85 项） |
 | **S5** | 多云厂商 provider 层（5 家）+ 真模型出稿 + 成本落库 + 分语种评测 | ✅ 已完成（R19 审核 → R20 修复） | `python scripts/verify_s5.py`（离线 18 项）+ `dev.ps1 audit5`（54 项） |
+| **S6-5** | 企业知识库导入：CSV/JSON → 字段映射与校验 → 新库版本 → 显式建索引 → 走发布灰度 | ✅ 已交卷 | `python -m pytest tests/test_kb_import.py -q`（19 项） |
 | **S6** | 前端联调 + 镜像构建 + 灰度回滚 | ✅ 五个切片全部交卷（1a / 1b / 2 / 3 / 4；S6-3 待审核核验） | `python scripts/verify_s6.py`（Python 24 + Node 27 项）+ `dev.ps1 audit6`（49 + 渲染层 15 项）+ `python scripts/verify_s6_3.py`（91 项 × 双后端） |
 
 ## 本机环境（已实测）
@@ -32,7 +78,7 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 & $dev up        # 起 PostgreSQL 16(5433) + Redis 7(6380)
 & $dev check     # 交付前自检（十三步）：语法 + S1 双后端 + S2/S3 自证 + pytest + S2…S6/S6-3 独立审核
 & $dev verify    # 双后端验证（S1，53 项 × 2）
-& $dev test      # pytest（262 项）
+& $dev test      # pytest（280 项）
 & $dev status    # 看容器与端口
 & $dev push      # 推送当前分支到 GitHub（git 优先，失败自动切 API）
 & $dev release   # 发布与灰度命令行（status / create / advance / rollback / resolve）

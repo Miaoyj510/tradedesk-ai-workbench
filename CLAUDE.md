@@ -23,8 +23,10 @@ src/tradedesk/
   api/        FastAPI 层：app、auth（登录/会话/角色可见域）、workbench（读模型 BFF）、deps（闸门令牌守卫）
   store/      base（接口）、sqlite_store、postgres_store —— 换后端业务代码零改动
   release/    发布与灰度（S6-3）：manifest（发布清单）、bucketing（按企业分桶）、service（推进 / 分类别回滚）
+  data/       kb_seed（种子块）、kb_import（S6-5 企业知识库导入：解析 / 校验 / 版本化）
 scripts/      verify_s1…s6（自证）、audit_s2…s6（审核方断言）、eval_retrieval / eval_llm（评测）、release_cli（发布灰度命令行）、push.ps1（推送）
-docs/         S2…S6-ACCEPTANCE.md、审核报告 R9…R21、S4-EVAL-BASELINE.md、NEXT.md（状态卡）
+docs/         S2…S6-ACCEPTANCE.md、审核报告 R9…R21、S6-FIX-R22.md、S4-EVAL-BASELINE.md、NEXT.md（状态卡）
+             作品集：PORTFOLIO.md（一页纸）、ARCHITECTURE.md（架构图）、DEMO-SCRIPT.md（演示脚本）、screenshots/
 ```
 
 ## 三个角色 / 分支（WORKFLOW.md 第 1 节）
@@ -50,7 +52,7 @@ S1 → S2（R9→R10）→ S3（R11/R12/R14→R13/R16）→ S4-4a/4b/4c（R15→
 审核 R22 + R23（三轮共 11 个根因）已由实现线修完 —— 见 `docs/S6-FIX-R22.md`。
 
 `dev.ps1 check` **十三步**：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
-→ S2 独立审核 106/106 → pytest 262 passed → S3 独立审核 90/90 → S4 向量层 60/60（PG 62/62）
+→ S2 独立审核 106/106 → pytest 280 passed → S3 独立审核 90/90 → S4 向量层 60/60（PG 62/62）
 → S4 独立审核（SQLite 78 / PG 85）→ S5 独立审核 54 项 → S6 独立审核（49 + 渲染层 15 项）
 → **S6-3 灰度回滚自证（91 项 × SQLite / PostgreSQL 双后端）** → **S6-3 独立审核（67 项，含越权路径）**。
 

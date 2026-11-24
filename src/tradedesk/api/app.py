@@ -67,6 +67,22 @@ class AdvanceBody(BaseModel):
     to_stage: str
 
 
+class KbImportBody(BaseModel):
+    """企业知识库导入请求体（S6-5）。
+
+    `dry_run` **默认 true**：导入是破坏性动作，先看校验报告再确认。
+    内容可以传明文 `content`，也可以传 base64（`content_b64`，二进制文件）。
+    """
+    filename: str = ""
+    format: str = "auto"
+    content: str = ""
+    content_b64: str = ""
+    mapping: Dict[str, str] = Field(default_factory=dict)
+    kb_version: str = ""
+    dry_run: bool = True
+    skip_bad_rows: bool = False
+
+
 class ReleaseCreateBody(BaseModel):
     """建发布请求体（S6-3）。
 
@@ -107,6 +123,17 @@ def mount_ui(app: FastAPI) -> bool:
         return False
     app.mount("/ui", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 
+    # **不缓存**：本地 Demo 里前端文件改得很勤，浏览器缓存住旧 JS 会让人
+    # 以为"改了没生效"（比如侧栏按钮点了没反应 —— 其实跑的是缓存里的旧文件）。
+    # 生产环境当然要用带指纹的静态资源 + 长缓存，这里是开发形态，取"永远最新"。
+    # （StaticFiles 不收 headers 参数，所以走中间件。）
+    @app.middleware("http")
+    async def _no_store_ui(request, call_next):
+        resp = await call_next(request)
+        if request.url.path.startswith("/ui"):
+            resp.headers["Cache-Control"] = "no-store, must-revalidate"
+        return resp
+
     @app.get("/", include_in_schema=False)
     def _ui_index():
         return RedirectResponse(url="/ui/index.html")
@@ -138,6 +165,16 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
             "version": APP_VERSION,
             "backend": backend,
             "agents": [s.agent_id for s in app.state.ctx.registry.specs()],
+            # 嵌入 / 重排的真实状态（R24-03）：界面**不许写死模型名** ——
+            # 写死过一次（BGE-M3 / bge-reranker-v2-m3），而实际是 embo-01，
+            # 重排更是只有声明没有消费点。重排本期未实现，这里据实说。
+            "embedding": {
+                "model": getattr(app.state.ctx.config, "embedding_model", ""),
+                "dim": int(getattr(app.state.ctx.config, "embedding_dim", 0) or 0),
+                "enabled": bool(getattr(app.state.ctx.config, "embedder_enabled", False)),
+                "reranker_model": getattr(app.state.ctx.config, "reranker_model", ""),
+                "reranker_enabled": False,
+            },
             "time": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         }
 
@@ -320,6 +357,91 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
         """
         from .auth import role_catalog
         return role_catalog()
+
+    # ------------------------------------------------------------ 知识库导入（S6-5）
+    @app.get("/kb/versions")
+    def kb_versions() -> Dict[str, Any]:
+        """库版本清单：版本号 / 块数 / 向量数。
+
+        导入完是**新版本**，不是覆盖旧版本 —— 所以这里能同时看到多个版本并存，
+        这正是双索引（别名切换）能成立的前提。
+        """
+        return {"versions": app.state.ctx.store.list_kb_versions()}
+
+    @app.post("/kb/import")
+    def kb_import(body: KbImportBody,
+                  x_session_token: str = Header(default="")) -> Dict[str, Any]:
+        """导入企业知识库 → 新的库版本（默认干跑：只校验不落库）。
+
+        权限口径：导入是**发布链路的一部分**，走与建发布同一套角色闸门
+        （`release` 能力），而不是对外动作的闸门令牌 —— 闸门令牌管的是
+        "发给买家的东西"，导入不是对外动作。
+        """
+        from ..data.kb_import import decode_content, import_kb
+        approver, denied = _release_guard(x_session_token, "")
+        if denied is not None:
+            raise denied
+        try:
+            content = decode_content(body.content, body.content_b64)
+            report = import_kb(app.state.ctx.store, content=content,
+                              filename=body.filename, fmt=body.format,
+                              mapping=body.mapping, kb_version=body.kb_version,
+                              actor=approver or "local", dry_run=body.dry_run,
+                              skip_bad_rows=body.skip_bad_rows)
+        except ValueError as exc:
+            raise HTTPException(status_code=422,
+                                 detail={"code": "invalid_content", "message": str(exc)})
+        return report.as_dict()
+
+    @app.post("/kb/versions/{version}/index")
+    def kb_index_version(version: str,
+                          x_session_token: str = Header(default="")) -> Dict[str, Any]:
+        """给某个库版本建向量索引（**显式动作**：会调云端嵌入 API、计费）。
+
+        为什么不自动建：嵌入是**计费**的，而且索引是**发布流水线**的一步
+        （PRD 13.4.8），不该在启动时或导入时偷偷发生。
+
+        没有真嵌入器时用占位嵌入器建（结构上能跑通链路），
+        但返回里**明确标注**"占位向量、稠密通道不启用"——
+        占位向量没有语义能力，不能对外宣称有语义召回。
+        """
+        from ..retrieval.embedders import NullEmbedder
+        from ..retrieval.indexer import embedder_tag, index_kb
+        approver, denied = _release_guard(x_session_token, "")
+        if denied is not None:
+            raise denied
+        blocks = app.state.ctx.store.list_kb_chunks(version)
+        if not blocks:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "version_not_found",
+                         "message": "库里没有库版本 %s（先导入或检查版本号）" % version})
+        embedder = app.state.ctx.embedder
+        notes: List[str] = []
+        if embedder is None:
+            embedder = NullEmbedder()
+            notes.append("未配置嵌入器：已用**占位向量**建索引，稠密通道不启用"
+                         "（占位向量没有语义能力，不能当作语义召回）")
+        # R24-08：维度必须与库的向量列一致 —— pgvector 的 vector(N) **拒绝错误维度**
+        # （CLAUDE.md 已录这个坑）。占位嵌入器 256 维、库列 1536 维 → 插不进去。
+        # 这里明确拒绝并说清原因，而不是让调用方撞一个 502。
+        want_dim = int(getattr(embedder, "dim", 0) or 0)
+        have_dim = int(getattr(app.state.ctx.store, "vector_dim", 0) or 0)
+        if want_dim and have_dim and want_dim != have_dim:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "dim_mismatch",
+                         "message": "嵌入器维度 %d 与库向量列维度 %d 不一致 —— 向量插不进去"
+                                    "（pgvector 拒绝错误维度）。请配置真实嵌入器，"
+                                    "或重建向量列后重试。" % (want_dim, have_dim)})
+        try:
+            res = index_kb(app.state.ctx.store, embedder, version, chunks=blocks)
+        except Exception as exc:
+            raise HTTPException(status_code=502,
+                                detail={"code": "index_failed", "message": str(exc)[:300]})
+        return {"kb_version": version, "indexed": res.get("indexed", 0),
+                "skipped": res.get("skipped", 0),
+                "embedder": embedder_tag(embedder), "notes": notes}
 
     # ------------------------------------------------------------ 发布与灰度（S6-3）
     def _release_service():

@@ -24,16 +24,16 @@
       <a href="dashboard.html"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>运营看板</a>
       <a href="knowledge.html" aria-current="page"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h12v18H6a2 2 0 0 1-2-2z"/><path d="M8 3v18"/></svg>知识库与检索</a>
       <div class="rail-label" style="margin-top:16px">Agent</div>
-      <button type="button"><span class="dot dot-live" aria-hidden="true"></span>Inquiry 询盘应答<span class="count">在线</span></button>
-      <button type="button"><span class="dot dot-live" aria-hidden="true"></span>Sentinel 交易风控<span class="count">在线</span></button>
-      <button type="button"><span class="dot dot-decl" aria-hidden="true"></span>Merch 商品运营<span class="count">仅声明</span></button>
-      <button type="button"><span class="dot dot-decl" aria-hidden="true"></span>Growth 推广<span class="count">仅声明</span></button>
+      <button type="button" data-agent-id="inquiry.reply" aria-haspopup="dialog" title="查看角色契约"><span class="dot dot-live" aria-hidden="true"></span>Inquiry 询盘应答<span class="count">在线</span></button>
+      <button type="button" data-agent-id="sentinel.risk" aria-haspopup="dialog" title="查看角色契约"><span class="dot dot-live" aria-hidden="true"></span>Sentinel 交易风控<span class="count">在线</span></button>
+      <button type="button" data-agent-id="merch.listing" aria-haspopup="dialog" title="查看角色契约"><span class="dot dot-decl" aria-hidden="true"></span>Merch 商品运营<span class="count">仅声明</span></button>
+      <button type="button" data-agent-id="growth.campaign" aria-haspopup="dialog" title="查看角色契约"><span class="dot dot-decl" aria-hidden="true"></span>Growth 推广<span class="count">仅声明</span></button>
     </nav>
     <div class="rail-foot">
       <div class="agent-chip"><span class="dot dot-live" aria-hidden="true"></span><span>本地 Docker · 云端模型 API</span></div>
       <div style="margin-top:6px" id="current-user">当前用户：<b>—</b></div>
       <div style="margin-top:4px"><button type="button" class="signout" id="signout">切换身份</button></div>
-      <div style="margin-top:2px">版本 v1.0 · 本地 Demo</div>
+      <div style="margin-top:2px">版本 v1.0.1 · 本地 Demo</div>
     </div>
   </aside>
 
@@ -46,7 +46,7 @@
       <div class="kpis">
         <div class="kpi"><span class="kpi-label">知识库版本</span><span class="kpi-value" id="kb-version" style="font-size:13px">—</span></div>
         <div class="kpi"><span class="kpi-label">名单库版本</span><span class="kpi-value" style="font-size:13px">sanctions-2026.11-a</span></div>
-        <div class="kpi"><span class="kpi-label">嵌入 / 重排</span><span class="kpi-value" style="font-size:13px">BGE-M3 / bge-reranker-v2-m3</span></div>
+        <div class="kpi"><span class="kpi-label">嵌入 / 重排</span><span class="kpi-value" id="kb-embed-hint" style="font-size:13px">读取中…</span></div>
       </div>
     </header>
 
@@ -61,6 +61,36 @@
             三个检索难点的工程解法：<b>跨语种召回</b>＝多语种嵌入 + 术语表扩展 + 三路融合重排；<b>合规时效</b>＝按「买家所在国 + 当前日期」过滤；<b>结构化/非结构化混合</b>＝属性过滤 + 语义召回经 RRF 融合后统一重排。
           </p>
         </div>
+      </section>
+
+      <!-- 企业知识库导入（S6-5） -->
+      <section class="card">
+        <div class="panel-hd"><h2>企业知识库导入</h2><span class="hint">CSV / JSON → 新的库版本</span></div>
+        <div class="panel-body">
+          <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+            <div class="field" style="flex:1 1 320px">
+              <label for="kb-import-file">选择文件（.csv / .json）</label>
+              <input class="input" id="kb-import-file" type="file" accept=".csv,.json,text/csv,application/json">
+            </div>
+            <button class="btn" id="kb-import-preview">预览校验（不落库）</button>
+            <button class="btn" id="kb-import-commit" disabled>确认导入</button>
+            <button class="btn" id="kb-import-index" disabled>为该版本建索引</button>
+          </div>
+          <p style="font-size:11px;color:var(--color-muted-foreground);margin-top:10px">
+            导入产出的是<b>新库版本</b>（不覆盖旧版本）→ 可直接走发布流程灰度；
+            出问题按 knowledge 类别回滚（双索引别名切换，<b>不重建</b>）。<br>
+            <b>证书与法规必须带有效期</b>（否则检索无法按「买家所在国 + 当前日期」过滤）；
+            数值字段进结构化属性（走属性过滤），不进正文文本。<br>
+            <b>建索引是显式动作</b>：会调云端嵌入 API、<b>计费</b>。
+          </p>
+          <div id="kb-import-report" style="margin-top:12px"></div>
+        </div>
+      </section>
+
+      <!-- 库版本清单 -->
+      <section class="card">
+        <div class="panel-hd"><h2>库版本清单</h2><span class="hint" id="kb-versions-hint">—</span></div>
+        <div class="panel-body"><div id="kb-versions"></div></div>
       </section>
 
       <div class="grid-2">
@@ -87,7 +117,7 @@
 
         <!-- 术语表 -->
         <section class="card">
-          <div class="panel-hd"><h2>多语种术语表</h2><span class="hint">200 概念 × zh/en/es/ar（含禁用译法）</span></div>
+          <div class="panel-hd"><h2>多语种术语表</h2><span class="hint" id="kb-terms-hint">读取中…</span></div>
           <div class="panel-body">
             <div id="term-table"></div>
             <p style="font-size:11px;color:var(--color-muted-foreground);margin-top:12px">

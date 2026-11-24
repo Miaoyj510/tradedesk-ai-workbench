@@ -508,6 +508,262 @@
     });
   }
 
+  /* ================= Agent 契约抽屉 ================= */
+  /* 为什么要有它：侧栏那四个 Agent 之前是**写死的按钮、没绑任何事件** ——
+     点了没反应，看起来像界面坏了。其实后端一直有角色契约（GET /agents），
+     只是界面没把它露出来。现在点开就能看到：做什么 / 不做什么 / 工具接口；
+     "仅声明"的角色会明确写出"本期未实现，写接口永不真正执行"。
+
+     兼容性：抽屉**运行时创建**，所以三个页面共用一份实现；
+     数据在**点击时**才取（api 模式打 /agents，mock 模式用 data.js 的副本），
+     不影响首屏加载，也不影响渲染层审核的 DOM 桩。 */
+  let AGENT_CACHE = null;
+
+  function ensureAgentDrawer() {
+    // 复用判断用 **id**：DOM 桩对不存在的选择器会返回一个"凭空造的元素"，
+    // 只判存在会把抽屉当成已存在 → 永远不创建、永远没内容（R24-06 的坑）。
+    let drawer = $('#agent-drawer');
+    if (drawer && drawer.id === 'agent-drawer') {
+      if (!drawer.__bound) {
+        drawer.__bound = true;
+        const closeBtn0 = $('#agent-drawer-close');
+        if (closeBtn0) closeBtn0.addEventListener('click', closeAgentDrawer);
+        drawer.addEventListener('click', e => { if (e.target === drawer) closeAgentDrawer(); });
+      }
+      return drawer;
+    }
+    drawer = document.createElement('div');
+    drawer.className = 'drawer';
+    drawer.id = 'agent-drawer';
+    drawer.setAttribute('aria-hidden', 'true');
+    drawer.innerHTML =
+      '<div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="agent-drawer-title">'
+      + '<div class="drawer-head"><div>'
+      + '<div class="drawer-eyebrow" id="agent-drawer-eyebrow">Agent 契约</div>'
+      + '<h2 class="drawer-title" id="agent-drawer-title">—</h2></div>'
+      + '<button type="button" class="drawer-close" id="agent-drawer-close" aria-label="关闭">×</button></div>'
+      + '<div class="drawer-body" id="agent-drawer-body"></div></div>';
+    document.body.appendChild(drawer);
+    // 关闭事件的绑定必须**跟着创建走**：抽屉是点击时才出现的，
+    // 在页面加载时绑定根本绑不上（那时元素还不存在）—— 叉号点了没反应就是这么来的。
+    const closeBtn = $('#agent-drawer-close');
+    if (closeBtn) closeBtn.addEventListener('click', closeAgentDrawer);
+    drawer.addEventListener('click', e => { if (e.target === drawer) closeAgentDrawer(); });
+    return drawer;
+  }
+
+  async function getAgents() {
+    if (currentSource === 'api' && window.TDApi && window.TDApi.loadAgents) {
+      try {
+        const list = await window.TDApi.loadAgents();
+        if (list && list.length) { AGENT_CACHE = list; return list; }
+      } catch (err) {
+        toast('读取角色契约失败：' + err.message, 'danger');
+      }
+    }
+    return AGENT_CACHE || (D.agents || []);
+  }
+
+  function agentPanelHtml(a) {
+    const declared = a.status === 'declared_only';
+    const items = (arr) => (arr || []).map(x => '<li>' + esc(x) + '</li>').join('');
+    const rows = (a.tools || []).map(t => {
+      const mode = t.mode === 'write' ? '写' : '只读';
+      const impl = t.implemented ? '已实现'
+        : (t.mode === 'write' ? '已声明 · 永不真正执行' : '已声明 · 本期不实现');
+      return '<tr><td>' + esc(t.name) + '</td><td>' + mode + '</td><td>' + impl + '</td></tr>';
+    }).join('');
+    return ''
+      + (declared
+        ? '<div class="drawer-note is-warn"><b>本期未实现</b>：只做角色声明与工具接口，不执行任何实际动作；'
+          + '写接口按 PRD 声明为「永不真正执行」。</div>'
+        : '<div class="drawer-note is-ok"><b>本期已实现</b>：由调度器 Supervisor 调用；'
+          + '只产出草稿，绝不自动对外发送。</div>')
+      + '<div class="drawer-grid">'
+      + '<section><h3>做什么</h3><ul class="drawer-list">' + items(a.scope_included) + '</ul></section>'
+      + '<section><h3>不做什么</h3><ul class="drawer-list is-off">' + items(a.scope_excluded) + '</ul></section>'
+      + '</div>'
+      + '<h3>工具接口</h3>'
+      + '<table class="drawer-table"><thead><tr><th>工具</th><th>模式</th><th>实现状态</th></tr></thead><tbody>'
+      + (rows || '<tr><td colspan="3">—</td></tr>') + '</tbody></table>'
+      + '<div class="drawer-foot">契约来源：后端角色注册表 <code>GET /agents</code>（AgentSpec）</div>';
+  }
+
+  async function openAgentDrawer(agentId) {
+    const drawer = ensureAgentDrawer();
+    const body = $('#agent-drawer-body');
+    const title = $('#agent-drawer-title');
+    const eyebrow = $('#agent-drawer-eyebrow');
+    if (!body || !title) return;
+    const list = await getAgents();
+    const a = list.find(x => x.agent_id === agentId);
+    if (a) {
+      title.textContent = (a.display_name || a.agent_id) + ' · ' + (a.agent_id || '');
+      if (eyebrow) {
+        eyebrow.textContent = a.status === 'declared_only' ? '仅声明角色 · 本期未实现' : '本期已实现';
+      }
+      body.innerHTML = agentPanelHtml(a);
+    } else {
+      title.textContent = agentId || '角色';
+      if (eyebrow) eyebrow.textContent = 'Agent 契约';
+      body.innerHTML = '<div class="drawer-note is-warn">后端没有声明这个角色。</div>';
+    }
+    drawer.classList.add('is-open');
+    drawer.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeAgentDrawer() {
+    const drawer = $('#agent-drawer');
+    if (!drawer) return;
+    drawer.classList.remove('is-open');
+    drawer.setAttribute('aria-hidden', 'true');
+  }
+
+  function initAgentRail() {
+    $$('[data-agent-id]').forEach(b => {
+      b.addEventListener('click', () => openAgentDrawer(b.dataset.agentId));
+    });
+    // 关闭按钮与遮罩的绑定在 ensureAgentDrawer() 里（元素创建时才绑）；
+    // 这里只负责 ESC —— 它是 document 级的，与抽屉是否已创建无关。
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAgentDrawer(); });
+  }
+
+  /* ================= 企业知识库导入（S6-5） ================= */
+  /* 为什么放在知识库页而不是设置页：导入的是**检索语料**，不是配置。
+     链路是：文件 → 校验报告 → 确认导入（新库版本）→ 显式建索引（计费）
+     → 走发布流程灰度 → 出问题按 knowledge 类别回滚。
+     注意：**导入完不会自动生效** —— 当前检索仍走已发布的库版本，
+     这是"发布与回滚"存在的意义（不能改一下库就悄悄影响正在服务的买家）。 */
+  function initKbImport() {
+    const fileInput = $('#kb-import-file');
+    if (!fileInput) return;
+    const report = $('#kb-import-report');
+    const previewBtn = $('#kb-import-preview');
+    const commitBtn = $('#kb-import-commit');
+    const indexBtn = $('#kb-import-index');
+    let fileText = '';
+    let fileName = '';
+    let pendingVersion = '';
+
+    if (currentSource !== 'api' || !window.TDApi || !window.TDApi.kbImport) {
+      if (report) {
+        report.innerHTML = '<div class="note-box is-warn">演示数据（mock）模式下不能导入 —— '
+          + '导入会写库，属于真数据操作。用 <code>?source=api</code> 打开后端托管页面再试。</div>';
+      }
+      [previewBtn, commitBtn, indexBtn].forEach(b => { if (b) b.disabled = true; });
+      return;
+    }
+
+    fileInput.addEventListener('change', e => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      fileName = f.name;
+      const reader = new FileReader();
+      reader.onload = () => {
+        fileText = String(reader.result || '');
+        if (report) {
+          report.innerHTML = '<div class="note-box is-ok">已读取 <b>' + esc(fileName) + '</b>（'
+            + Math.max(1, Math.round(fileText.length / 1024)) + ' KB）。点「预览校验」看结果。</div>';
+        }
+        if (commitBtn) commitBtn.disabled = true;
+        if (indexBtn) indexBtn.disabled = true;
+      };
+      reader.readAsText(f, 'utf-8');
+    });
+
+    function renderReport(r, title) {
+      if (!report) return;
+      const stats = '<div class="kb-stat">'
+        + '<div><b>' + r.total_rows + '</b><span>总行数</span></div>'
+        + '<div><b>' + r.accepted + '</b><span>通过</span></div>'
+        + '<div><b>' + r.rejected + '</b><span>拒绝</span></div>'
+        + '<div><b>' + esc(r.kb_version) + '</b><span>目标库版本</span></div></div>';
+      const errRows = (r.errors || []).map(e => '<tr class="is-error"><td class="is-num">' + e.row
+        + '</td><td>' + esc(e.field) + '</td><td>' + esc(e.message) + '</td></tr>').join('');
+      const warnRows = (r.warnings || []).map(e => '<tr class="is-warn"><td class="is-num">' + e.row
+        + '</td><td>' + esc(e.field) + '</td><td>' + esc(e.message) + '</td></tr>').join('');
+      let html = '<div class="note-box ' + (r.rejected ? 'is-warn' : 'is-ok') + '"><b>' + esc(title) + '</b>'
+        + (r.dry_run ? '（干跑：没有落库）' : '（已落库 ' + r.written + ' 块）')
+        + (r.rejected
+          ? '：有错误行，<b>整批未落库</b> —— 请改文件后重试。'
+          : '：校验通过。')
+        + '</div>' + stats;
+      if (errRows) {
+        html += '<table class="data-table"><thead><tr><th>行</th><th>字段</th><th>问题</th></tr></thead><tbody>'
+          + errRows + '</tbody></table>';
+      }
+      if (warnRows) {
+        html += '<table class="data-table"><thead><tr><th>行</th><th>字段</th><th>提醒</th></tr></thead><tbody>'
+          + warnRows + '</tbody></table>';
+      }
+      report.innerHTML = html;
+    }
+
+    async function loadKbVersions() {
+      const host = $('#kb-versions');
+      if (!host) return;
+      try {
+        const r = await window.TDApi.kbVersions();
+        const rows = (r.versions || []).map(v => '<tr><td>' + esc(v.kb_version)
+          + '</td><td class="is-num">' + v.chunks + '</td><td class="is-num">' + v.vectors + '</td></tr>').join('');
+        host.innerHTML = '<table class="data-table"><thead><tr><th>库版本</th><th>块数</th><th>向量数</th></tr></thead><tbody>'
+          + (rows || '<tr><td colspan="3">暂无</td></tr>') + '</tbody></table>';
+        const hint = $('#kb-versions-hint');
+        if (hint) hint.textContent = (r.versions || []).length + ' 个版本并存';
+      } catch (err) {
+        if (host) host.innerHTML = '<div class="note-box is-warn">读取版本清单失败：' + esc(err.message) + '</div>';
+      }
+    }
+
+    if (previewBtn) {
+      previewBtn.addEventListener('click', async () => {
+        if (!fileText) { toast('先选一个 CSV / JSON 文件', 'warn'); return; }
+        try {
+          const r = await window.TDApi.kbImport({ filename: fileName, content: fileText, dry_run: true });
+          renderReport(r, '预览校验');
+          pendingVersion = r.kb_version;
+          if (commitBtn) commitBtn.disabled = !(r.accepted > 0);
+          if (indexBtn) indexBtn.disabled = true;
+        } catch (err) {
+          toast('预览失败：' + err.message, 'danger');
+        }
+      });
+    }
+
+    if (commitBtn) {
+      commitBtn.addEventListener('click', async () => {
+        if (!fileText) return;
+        try {
+          const r = await window.TDApi.kbImport({ filename: fileName, content: fileText, dry_run: false });
+          renderReport(r, '导入完成');
+          pendingVersion = r.kb_version;
+          if (indexBtn) indexBtn.disabled = !(r.written > 0);
+          if (commitBtn) commitBtn.disabled = true;
+          toast('已导入为新库版本 ' + r.kb_version + '（尚未发布，检索仍走当前版本）', '');
+          loadKbVersions();
+        } catch (err) {
+          toast('导入失败：' + err.message, 'danger');
+        }
+      });
+    }
+
+    if (indexBtn) {
+      indexBtn.addEventListener('click', async () => {
+        if (!pendingVersion) return;
+        try {
+          const r = await window.TDApi.kbIndexVersion(pendingVersion);
+          toast('已为 ' + r.kb_version + ' 建索引：' + r.indexed + ' 块', '');
+          (r.notes || []).forEach(n => toast(n, 'warn'));
+          loadKbVersions();
+        } catch (err) {
+          toast('建索引失败：' + err.message, 'danger');
+        }
+      });
+    }
+
+    loadKbVersions();
+  }
+
   /* ================= 运营看板 ================= */
   function initDashboard() {
     const s = $('#stage-chart');
@@ -639,6 +895,32 @@
       host.innerHTML = rows;
       $('#kb-date-label').textContent = '检索基准日：' + dateStr + '（法规与证书按「买家所在国 + 当前日期」过滤）';
     }
+    // 术语表数量：读**实数**，并把与 PRD 要求的差距写在界面上（R24-02）。
+    // 之前这里写死"200 概念"，而实际只有 2 块 —— 写死一个未达标的数字，
+    // 等于把"没做到"显示成"做到了"。
+    const termsHint = document.querySelector('#kb-terms-hint');
+    if (termsHint) {
+      const n = (D.terms || []).length;
+      termsHint.textContent = n + ' 概念 × zh/en/es/ar（含禁用译法）'
+        + (n >= 200 ? '' : ' —— PRD 要求 ≥200，本期仅 ' + n + '，未达标');
+    }
+    // 嵌入 / 重排：读后端**真实状态**，不写死模型名（R24-03）。
+    // 之前写死 BGE-M3 / bge-reranker-v2-m3，而实际嵌入是 embo-01，
+    // 重排更是只有配置项、没有消费点 —— 那属于"装饰性声明"。
+    const embedHint = document.querySelector('#kb-embed-hint');
+    if (embedHint && window.TDApi && window.TDApi.req) {
+      try {
+        window.TDApi.req('/health').then(h => {
+          const e = (h && h.embedding) || {};
+          embedHint.textContent = (e.enabled ? (e.model || '已启用') : '未启用（占位，稠密通道关闭）')
+            + (e.dim ? ' · ' + e.dim + ' 维' : '')
+            + ' · 重排未实现（PRD 原定，本期无消费点）';
+        }).catch(() => { embedHint.textContent = '读取失败'; });
+      } catch (err) {
+        embedHint.textContent = '读取失败';
+      }
+    }
+
     const di = $('#kb-date');
     di.value = '2026-11-17';
     di.addEventListener('change', e => render(e.target.value));
@@ -661,6 +943,6 @@
       applyUser(u);
     }
     await loadSource();
-    initWorkbench(); initDashboard(); initKnowledge();
+    initWorkbench(); initDashboard(); initKnowledge(); initAgentRail(); initKbImport();
   });
 })();

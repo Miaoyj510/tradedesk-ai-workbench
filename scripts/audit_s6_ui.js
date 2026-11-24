@@ -69,6 +69,25 @@ function makeEl(tag) {
 /* 线程按钮：app.js 渲染完列表后会给每个 .thread 绑 click；
  * 桩里我们按读模型里的线程顺序造按钮，好让审核方能"点开"任意一条线程。 */
 let threadButtons = [];
+
+/* Agent 契约按钮（R24-06）：侧栏那四个 Agent 也是 app.js 绑的 click。
+ * R21 的教训在 S6-5 上重演过一次："新代码对 DOM 桩无害"≠"新代码被验证过" ——
+ * 这一段不造按钮，initAgentRail 就空转，抽屉的渲染与关闭路径一次都不会跑。 */
+const AGENT_BUTTONS = [
+  { id: 'inquiry.reply', name: 'Inquiry 询盘应答' },
+  { id: 'sentinel.risk', name: 'Sentinel 交易风控' },
+  { id: 'merch.listing', name: 'Merch 商品运营' },
+  { id: 'growth.campaign', name: 'Growth 推广' }
+];
+let agentButtons = [];
+function makeAgentButtons() {
+  return AGENT_BUTTONS.map(a => {
+    const b = makeEl('button');
+    b.dataset.agentId = a.id;
+    b.click = function () { (this.handlers['click'] || []).forEach(fn => fn()); };
+    return b;
+  });
+}
 function makeThreadButtons(ids) {
   return ids.map(id => {
     const b = makeEl('button');
@@ -86,8 +105,21 @@ function el(sel) {
 
 const document = {
   querySelector(sel) { return el(sel); },
-  querySelectorAll(sel) { return sel === '.thread' ? threadButtons : []; },
-  createElement(tag) { return makeEl(tag); },
+  querySelectorAll(sel) {
+    if (sel === '.thread') return threadButtons;
+    if (sel === '[data-agent-id]') return agentButtons;
+    return [];
+  },
+  createElement(tag) {
+    const e = makeEl(tag);
+    let _id = '';
+    Object.defineProperty(e, 'id', {
+      get() { return _id; },
+      set(v) { _id = v; if (v) registry['#' + v] = e; },
+      configurable: true
+    });
+    return e;
+  },
   addEventListener(type, fn) { if (type === 'DOMContentLoaded') domReady = fn; },
   body: makeEl('body'),
 };
@@ -155,6 +187,7 @@ async function main() {
   const live = await api.loadWorkbench();
   const liveThreadIds = (live.threads || []).map(t => t.id);
   threadButtons = makeThreadButtons(liveThreadIds);
+  agentButtons = makeAgentButtons();
 
   /* ---- 3. 真跑 app.js ---- */
   run('app.js');
@@ -170,6 +203,55 @@ async function main() {
   const termTable = el('#term-table').innerHTML;
 
   /* ---- 4. 断言 ---- */
+
+  /* ---- 4.1 Agent 契约抽屉（R24-06）----
+   * 这一段以前**一次都没跑过**：DOM 桩的 querySelectorAll('[data-agent-id]')
+   * 返回 []，initAgentRail 空转，抽屉的渲染与关闭路径完全没被验证。
+   * "新代码对桩无害"不等于"新代码被验证过"（R21 的教训在 S6-5 上重演）。
+   */
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const drawerBody = () => el('#agent-drawer-body').innerHTML;
+  const drawerEl = () => el('#agent-drawer');
+
+  // 先取**真后端**的角色数据，再在内存里塞进一个 <script> 载荷：
+  //   ① 契约文案断言要基于真数据（别自己编一套）；
+  //   ② app.js 会缓存首次取到的角色（AGENT_CACHE），所以载荷必须在**第一次取数前**注入，
+  //      否则第二次点击走缓存，注入根本不生效（这正是原断言失败的原因）。
+  const realAgents = await api.req('/agents');
+  const PAYLOAD = '<script>alert(1)</script>';
+  api.loadAgents = async () => realAgents.map(a => ({
+    ...a,
+    scope_included: (a.scope_included || []).concat([PAYLOAD]),
+    tools: (a.tools || []).map(t => ({ ...t, name: t.name + PAYLOAD }))
+  }));
+
+  agentButtons[0].click();                       // Inquiry（本期已实现）
+  await sleep(120);
+  const implHtml = drawerBody();
+  check('S6-R24', '抽屉：已实现角色写明"只产出草稿，绝不自动对外发送"',
+    implHtml.includes('绝不自动对外发送'), implHtml.slice(0, 120));
+  check('S6-R24', '抽屉：展示做什么 / 不做什么 / 工具接口三段',
+    implHtml.includes('做什么') && implHtml.includes('不做什么') && implHtml.includes('工具接口'));
+  check('S6-R24', '抽屉：打开后 aria-hidden=false',
+    drawerEl().getAttribute('aria-hidden') === 'false',
+    String(drawerEl().getAttribute('aria-hidden')));
+
+  agentButtons[2].click();                       // Merch（本期仅声明）
+  await sleep(120);
+  const declHtml = drawerBody();
+  check('S6-R24', '抽屉：仅声明角色写明"本期未实现"与"永不真正执行"',
+    declHtml.includes('本期未实现') && declHtml.includes('永不真正执行'),
+    declHtml.slice(0, 120));
+
+  // 转义：上面注入的 <script> 载荷必须被转义（不执行）
+  check('S6-R24', '抽屉：角色契约里的标签载荷被转义（不执行）',
+    !implHtml.includes('<script') && implHtml.includes('&lt;script'),
+    implHtml.slice(0, 140));
+
+  const closeBtn = el('#agent-drawer-close');
+  const closeHandlers = (closeBtn && closeBtn.handlers && closeBtn.handlers['click']) || [];
+  check('S6-R24', '抽屉：关闭按钮绑定了处理器（叉号能关）',
+    closeHandlers.length > 0, 'handlers=' + closeHandlers.length);
 
   // S6-B2 · 名单命中面板的条目 ID 必须来自后端，不能写死
   const blockedThread = (live.threads || []).find(t => t.id === blocked.thread_id);

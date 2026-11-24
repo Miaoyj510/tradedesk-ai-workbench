@@ -586,6 +586,16 @@ def _run_backend(backend: str, args, all_results) -> int:
         print("后端：PostgreSQL 16（Docker 容器，本地真实依赖）")
         print("DSN：%s" % args.dsn)
         try:
+            # 默认是**派生暂存库**（两个会话同时跑 check 不再互相 truncate）；
+            # 它可能还不存在 → 先建（已存在则忽略）。
+            try:
+                import psycopg
+                head = args.dsn.rsplit("/", 1)[0] + "/"
+                name = args.dsn.rsplit("/", 1)[1]
+                with psycopg.connect(head + "postgres", autocommit=True) as conn:
+                    conn.execute('CREATE DATABASE "%s"' % name)
+            except Exception:
+                pass
             store = PostgresStateStore(args.dsn)
         except Exception as e:
             print("  [SKIP] PostgreSQL 不可用，跳过该后端：%s: %s"
@@ -651,7 +661,10 @@ def main() -> int:
     ap.add_argument("--backend", choices=["sqlite", "postgres", "both"], default="sqlite",
                     help="跑哪个后端（默认 sqlite）")
     ap.add_argument("--db", default=str(ROOT / "data" / "verify_s6_3.db"), help="SQLite 文件路径")
-    ap.add_argument("--dsn", default=DEFAULT_DSN, help="PostgreSQL DSN")
+    # 默认用**独立暂存库**：验证脚本会 reset 它，直接打到开发库上会
+    # 抹掉别的会话的数据（R24 建议；两个会话同时跑 check 还会互相 truncate）。
+    ap.add_argument("--dsn", default=DEFAULT_DSN.rsplit("/", 1)[0] + "/tradedesk_verify_s63",
+                    help="PostgreSQL DSN（默认独立暂存库 tradedesk_verify_s63）")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     ap.add_argument("--keep", action="store_true", help="保留临时物（默认跑完清理）")
     args = ap.parse_args()
