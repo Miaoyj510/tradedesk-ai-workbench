@@ -489,6 +489,154 @@ def audit_wording() -> None:
 
 
 # --------------------------------------------------------------------------
+# §S6-M 越权路径（鉴权开启时）
+# --------------------------------------------------------------------------
+def _http_json(url, method="GET", body=None, headers=None):
+    import urllib.error
+    import urllib.request
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    h = {"Content-Type": "application/json"}
+    h.update(headers or {})
+    req = urllib.request.Request(url, data=data, headers=h, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            return e.code, json.loads(raw or "{}")
+        except Exception:
+            return e.code, {"raw": raw[:200]}
+
+
+def _start_server(db_path: str, auth_required: bool = True):
+    import subprocess
+    import time
+    import urllib.request
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(ROOT / "src")
+    env["TRADEDESK_DB_PATH"] = db_path
+    env["TRADEDESK_LLM_DRAFT_ENABLED"] = "0"
+    env["TRADEDESK_EMBEDDER_ENABLED"] = "0"
+    env["TRADEDESK_AUTH_REQUIRED"] = "1" if auth_required else "0"
+    port = free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "tradedesk.api.app:app",
+         "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning"],
+        cwd=str(ROOT), env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    base = "http://127.0.0.1:%d" % port
+    for _ in range(60):
+        if proc.poll() is not None:
+            out = proc.stdout.read().decode("utf-8", "replace") if proc.stdout else ""
+            raise RuntimeError("后端启动失败：\n" + out[-1200:])
+        try:
+            with urllib.request.urlopen(base + "/health", timeout=2):
+                return proc, base
+        except Exception:
+            time.sleep(0.5)
+    proc.terminate()
+    raise RuntimeError("后端启动超时")
+
+
+def audit_authz(db_path: str) -> None:
+    clause("S6-M")
+    proc = base = None
+    try:
+        proc, base = _start_server(db_path, auth_required=True)
+        # 登录拿令牌
+        st, r = _http_json(base + "/auth/login", "POST",
+                            {"username": "sales", "password": "demo1234"})
+        if st != 200 or not r.get("token"):
+            note("鉴权开启后拿不到会话令牌，跳过越权断言",
+                 "login 返回 %s：%s" % (st, json.dumps(r, ensure_ascii=False)[:120]))
+            return
+        sales_token = r["token"]
+        st, r = _http_json(base + "/auth/login", "POST",
+                            {"username": "manager", "password": "demo1234"})
+        manager_token = (r or {}).get("token", "")
+
+        # M1 无令牌 → 拒绝
+        st, _ = _http_json(base + "/release", "POST",
+                            {"components": {"prompt_version": "p-nope"},
+                             "approver": "某人", "change_notes": "x",
+                             "rollback_plan": "y", "pilot_companies": ["ACME Trading"]})
+        check("M1 开启鉴权后，建发布不带会话令牌 → 拒绝", st in (401, 403), str(st))
+
+        # M2 没有发布权限的角色 → 拒绝（越权路径）
+        st, r2 = _http_json(base + "/release", "POST",
+                             {"components": {"prompt_version": "p-sales"},
+                              "approver": "业务员自己填", "change_notes": "x",
+                              "rollback_plan": "y", "pilot_companies": ["ACME Trading"],
+                              "regression_evidence": "回归 R-999"},
+                             headers={"X-Session-Token": sales_token})
+        check("M2 无发布权限的角色（业务员）建发布 → 拒绝（越权）",
+              st in (401, 403), "HTTP %s（期望 401/403）" % st)
+
+        def _clear_canary(token):
+            """把在灰度中的发布回滚干净（业务规则：同时只允许一个灰度）。"""
+            st2, js = _http_json(base + "/release/status",
+                                    headers={"X-Session-Token": token})
+            for rel in ((js or {}).get("releases") or []):
+                if rel.get("status") != "canary":
+                    continue
+                for cat in ("app", "agent", "knowledge", "sanctions"):
+                    _http_json(base + "/release/rollback", "POST",
+                               {"release_id": rel.get("release_id"), "category": cat},
+                               headers={"X-Session-Token": token})
+
+        _clear_canary(manager_token)
+
+        # M3 有权限的角色 → 放行（说明 M2 不是"接口全坏"）
+        st, r = _http_json(base + "/release", "POST",
+                            {"components": {"prompt_version": "p-manager"},
+                             "approver": "", "change_notes": "x",
+                             "rollback_plan": "y", "pilot_companies": ["ACME Trading"],
+                             "regression_evidence": "回归 R-999"},
+                            headers={"X-Session-Token": manager_token})
+        ok_create = st == 200
+        check("M3 有发布权限的角色（经理）建发布 → 放行", ok_create,
+              "HTTP %s%s" % (st, "" if ok_create else "：" + json.dumps(r, ensure_ascii=False)[:120]))
+        real_rid = (r or {}).get("release_id") or ""
+
+        # M4 审批人不可伪造：请求体里的 approver 不能覆盖会话用户
+        st2, st_json = _http_json(base + "/release/status",
+                                    headers={"X-Session-Token": manager_token})
+        releases = (st_json or {}).get("releases") or []
+        approvers = {str(rel.get("approver") or "") for rel in releases}
+        # **反空断言**：状态接口没拿到发布记录时，下面两条断言会"因为空集而通过" ——
+        # 那是假通过，必须先确认拿得到数据。
+        got_data = st2 == 200 and bool(releases)
+        check("M4 前置：能读到发布台账（否则下面两条是空断言）", got_data,
+              "status 接口 HTTP %s，发布记录 %d 条" % (st2, len(releases)))
+        check("M4 审批人不得由请求体自称（必须取自会话用户）",
+              got_data and "业务员自己填" not in approvers and "某人" not in approvers,
+              "发布记录里的审批人=" + "、".join(sorted(approvers)))
+        check("M4b 审批人取自会话用户",
+              got_data and any(a in ("manager", "王强") for a in approvers),
+              "发布记录里的审批人=" + "、".join(sorted(approvers)))
+
+        # M5 无发布权限的角色 → 不能回滚（用真实发布号）
+        if real_rid:
+            st, _ = _http_json(base + "/release/rollback", "POST",
+                                {"release_id": real_rid, "category": "knowledge"},
+                                headers={"X-Session-Token": sales_token})
+            check("M5 无发布权限的角色回滚 → 拒绝（越权）", st in (401, 403),
+                  "HTTP %s（期望 401/403）" % st)
+        else:
+            note("M5 跳过", "没建出可回滚的发布（release_id 为空）")
+    except Exception as exc:  # noqa: BLE001
+        check("越权断言能跑起来", False, "%s: %s" % (type(exc).__name__, exc))
+    finally:
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                proc.kill()
+
+
+# --------------------------------------------------------------------------
 def _make_service(store, kb_version="kb-test", list_version="sanctions-test"):
     from tradedesk.release.manifest import baseline_components
     from tradedesk.release.service import ReleaseService
@@ -542,6 +690,7 @@ def main() -> int:
                   "%s: %s" % (type(exc).__name__, exc))
 
     audit_wording()
+    audit_authz(os.path.join(tmp, "s6r_authz.db"))
 
     shutil.rmtree(tmp, ignore_errors=True)
 
