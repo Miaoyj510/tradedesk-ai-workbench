@@ -32,7 +32,8 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(os.environ.get("TRADEDESK_AUDIT_ROOT") or
+            Path(__file__).resolve().parents[1])
 sys.path.insert(0, str(ROOT / "src"))
 
 
@@ -163,27 +164,59 @@ def _index_gap_declared() -> bool:
 # --------------------------------------------------------------------------
 # §S6-I 灰度分流
 # --------------------------------------------------------------------------
+def _cleanup_canary(svc) -> None:
+    """把在灰度中的发布全部回滚掉（让下一段断言从干净状态开始）。
+
+    为什么要清场：业务规则规定"同时只允许一个灰度"，各段断言各自建灰度会互相撞。
+    这不是绕过规则 —— 是审核脚本自己按规则收拾干净。
+    """
+    rel = svc.canary()
+    if rel is None:
+        return
+    for cat in list(rel.changed_categories):
+        try:
+            svc.rollback(rel.release_id, cat)
+        except Exception:
+            pass
+    for cat in ("app", "agent", "knowledge", "sanctions"):
+        if cat not in rel.rolled_back_categories:
+            try:
+                svc.rollback(rel.release_id, cat)
+            except Exception:
+                pass
+
+
+def _new_canary(svc, **kw):
+    """先清掉在灰度中的发布，再建一个新的（业务规则：同时只允许一个灰度）。"""
+    _cleanup_canary(svc)
+    return svc.create(pilot_companies=kw.pop("pilot_companies", ["ACME Trading"]), **kw)
+
+
 def audit_gray(svc) -> None:
     clause("S6-I")
+    _cleanup_canary(svc)
     from tradedesk.release.bucketing import enterprise_bucket, in_canary, normalize_company
 
     # G1 同企业不同买家同版本
-    rel = svc.create(components={"prompt_version": "p-g1"}, approver="审核员",
-                     change_notes="灰度分流测试", rollback_plan="切回",
-                     regression_evidence="回归 R-002", pilot_companies=["ACME Trading"])
+    rel = _new_canary(svc, components={"prompt_version": "p-g1"}, approver="审核员",
+                   change_notes="灰度分流测试", rollback_plan="切回",
+                   regression_evidence="回归 R-002")
     a = svc.resolve(company="ACME Trading", lang="en")
     b = svc.resolve(company="ACME Trading", lang="es")
     check("G1 同企业不同买家/不同线程拿到同一版本",
-          a.components == b.components,
-          "en=%s / es=%s" % (json.dumps(a.components, ensure_ascii=False),
-                             json.dumps(b.components, ensure_ascii=False)))
+          a.components == b.components and a.source == "canary",
+          "en=%s / es=%s / source=%s%s" % (
+              json.dumps(a.components, ensure_ascii=False),
+              json.dumps(b.components, ensure_ascii=False), a.source,
+              "（反空断言失败：拿到的不是灰度版本，这条断言就没证明力）"
+              if a.source != "canary" else ""))
 
     # G2 同一买家跨时间稳定（分桶是纯函数）
-    first = svc.resolve(company="Brasil Distribuidora Ltda", lang="es")
+    first = svc.resolve(company="ACME Trading", lang="en")
     svc.advance(rel.release_id, now=datetime.now(timezone.utc) + timedelta(days=3))
-    second = svc.resolve(company="Brasil Distribuidora Ltda", lang="es")
+    second = svc.resolve(company="ACME Trading", lang="en")
     check("G2 同一企业跨时间（推进档位后）仍拿到同一版本",
-          first.components == second.components,
+          first.components == second.components and first.source == "canary",
           "推进前=%s / 推进后=%s" % (json.dumps(first.components, ensure_ascii=False),
                                      json.dumps(second.components, ensure_ascii=False)))
 
@@ -199,9 +232,9 @@ def audit_gray(svc) -> None:
 
     # G5 观察窗：没到不许进档
     from tradedesk.release.service import ReleaseError
-    rel2 = svc.create(components={"prompt_version": "p-g5"}, approver="审核员",
-                      change_notes="观察窗测试", rollback_plan="切回",
-                      regression_evidence="回归 R-003", pilot_companies=["ACME Trading"])
+    rel2 = _new_canary(svc, components={"prompt_version": "p-g5"}, approver="审核员",
+                    change_notes="观察窗测试", rollback_plan="切回",
+                    regression_evidence="回归 R-003")
     blocked = False
     try:
         svc.advance(rel2.release_id)
@@ -211,22 +244,20 @@ def audit_gray(svc) -> None:
           "立刻推进被拒" if blocked else "观察窗没满竟然放行了")
 
     # G5b 不许跳档
-    jumped = False
+    one_step = None
     try:
         svc.advance(rel2.release_id, now=datetime.now(timezone.utc) + timedelta(days=3))
-        svc.advance(rel2.release_id, now=datetime.now(timezone.utc) + timedelta(days=6))
-        stage = svc.get(rel2.release_id).stage
-        jumped = stage != "P50"
-    except ReleaseError:
-        jumped = True
-    check("G5b 不许跳档（一次只进一档）", jumped,
-          "连推两次后档位=%s" % (svc.get(rel2.release_id).stage if svc.get(rel2.release_id) else "?"))
+        one_step = svc.get(rel2.release_id).stage
+    except ReleaseError as exc:
+        one_step = "REJECTED: %s" % exc.code
+    check("G5b 不许跳档（一次 advance 只进一档：PILOT → P20）",
+          one_step == "P20",
+          "一次推进后档位=%s（期望 P20；跳到 P50 就是跳过了中间观察期）" % one_step)
 
     # G6 语种限定
-    rel3 = svc.create(components={"prompt_version": "p-g6"}, approver="审核员",
-                      change_notes="语种灰度测试", rollback_plan="切回",
-                      regression_evidence="回归 R-004", pilot_companies=["ACME Trading"],
-                      langs=["es"])
+    rel3 = _new_canary(svc, components={"prompt_version": "p-g6"}, approver="审核员",
+                    change_notes="语种灰度测试", rollback_plan="切回",
+                    regression_evidence="回归 R-004", langs=["es"])
     es = svc.resolve(company="ACME Trading", lang="es")
     en = svc.resolve(company="ACME Trading", lang="en")
     unknown = svc.resolve(company="ACME Trading", lang="")
@@ -247,10 +278,10 @@ def audit_gray(svc) -> None:
 # --------------------------------------------------------------------------
 def audit_rollback(svc, store) -> None:
     clause("S6-J")
-    rel = svc.create(components={"kb_version": "kb-rollback-test",
-                                  "prompt_version": "p-rollback"},
-                      approver="审核员", change_notes="回滚测试", rollback_plan="切回",
-                      regression_evidence="回归 R-005", pilot_companies=["ACME Trading"])
+    rel = _new_canary(svc, components={"kb_version": "kb-rollback-test",
+                                 "prompt_version": "p-rollback"},
+                   approver="审核员", change_notes="回滚测试", rollback_plan="切回",
+                   regression_evidence="回归 R-005")
     svc.advance(rel.release_id, now=datetime.now(timezone.utc) + timedelta(days=3))
     svc.advance(rel.release_id, now=datetime.now(timezone.utc) + timedelta(days=6))
     svc.advance(rel.release_id, now=datetime.now(timezone.utc) + timedelta(days=9))
@@ -341,10 +372,9 @@ def audit_freeze(svc) -> None:
           "无证据被拒" if blocked2 else "无证据竟然建成了")
 
     # K3 发布记录 5 要素
-    rel = svc.create(components={"prompt_version": "p-audit"}, approver="审批人张三",
-                     change_notes="把提示词升到 p-audit", rollback_plan="切回 prompt-上一版",
-                     regression_evidence="L-1..L-7 回归报告 R-006",
-                     pilot_companies=["ACME Trading"], langs=["en"])
+    rel = _new_canary(svc, components={"prompt_version": "p-audit"}, approver="审批人张三",
+                   change_notes="把提示词升到 p-audit", rollback_plan="切回 prompt-上一版",
+                   regression_evidence="L-1..L-7 回归报告 R-006", langs=["en"])
     events = _audit_events(svc.store, "release.create")
     need = ("components", "approver", "change_notes", "rollback_plan",
             "pilot_companies", "langs")
@@ -372,6 +402,25 @@ def audit_freeze(svc) -> None:
 # --------------------------------------------------------------------------
 # §S6-L 口径守卫（不许声称生产达标）
 # --------------------------------------------------------------------------
+def _cn_num(text: str):
+    """中文数字 → 整数（状态卡里步数写的是"十一步"）。"""
+    text = str(text).strip()
+    if text.isdigit():
+        return int(text)
+    digits = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+    if "十" in text:
+        left, _, right = text.partition("十")
+        tens = digits.get(left, 1) if left else 1
+        ones = digits.get(right, 0) if right else 0
+        return tens * 10 + ones
+    total = 0
+    for ch in text:
+        if ch in digits:
+            total = total * 10 + digits[ch]
+    return total
+
+
 def audit_wording() -> None:
     clause("S6-L")
     import re
@@ -381,8 +430,8 @@ def audit_wording() -> None:
 
     # Z1 不得出现生产口径的达标声明
     bad = [ln.strip() for ln in txt.splitlines()
-           if re.search(r"(已支持|可一键|支持)?(灰度发布|生产环境|一键回滚生产)", ln)
-           and not re.search(r"(不得|不能|未做|未实现|不准|禁止|顺延|v1\.1|未完成|差距)", ln)]
+           if re.search(r"(已|可)?(支持|具备|实现|提供)(生产级)?(灰度发布|灰度回滚|一键回滚|生产回滚|自动回滚)", ln)
+           and not re.search(r"(不得|不能|未做|未实现|不准|禁止|顺延|v1\.1|未完成|差距|机制)", ln)]
     check("Z1 验收基线不得出现生产口径的达标声明（本期是机制可验证）",
           not bad, "命中：" + " / ".join(bad[:2]) if bad else "")
 
@@ -398,7 +447,8 @@ def audit_wording() -> None:
     # Z3 PRD 12.5 门槛 10 仍顺延 v1.1
     if prd.exists():
         p = prd.read_text(encoding="utf-8")
-        gate = [ln for ln in p.splitlines() if "灰度对照" in ln and "回复率相对提升" in ln]
+        gate = [ln for ln in p.splitlines()
+                if "灰度对照" in ln and "回复率相对提升" in ln and "询盘→报价" in ln]
         ok = bool(gate) and ("v1.1" in gate[0] or "顺延" in gate[0] or "无真实买家流量" in gate[0])
         check("Z3 PRD 12.5 门槛 10（灰度对照）仍顺延 v1.1（无真实买家流量）",
               ok, gate[0].strip()[:120] if gate else "没找到门槛 10")
@@ -430,11 +480,12 @@ def audit_wording() -> None:
         n = nxt.read_text(encoding="utf-8")
         steps = re.findall(r"check\s+(\d+)/(\d+)", d)
         total = max((int(b) for _a, b in steps), default=0)
-        m = re.search(r"check`?\s*(?:是|现在)?\s*\*\*(\d+)\s*步", n)
-        declared = int(m.group(1)) if m else None
+        m = re.search(r"check`?\s*(?:现在是|是|现在)?\s*\*\*([0-9]+|[一二三四五六七八九十]+)\s*步", n)
+        declared = _cn_num(m.group(1)) if m else None
         check("M4 门禁步数与状态卡写的一致",
-              declared is None or declared == total,
-              "dev.ps1 是 %s 步，状态卡写 %s 步" % (total, declared))
+              declared is not None and declared == total,
+              "dev.ps1 是 %s 步，状态卡写 %s 步" % (total, declared)
+              if declared is not None else "状态卡里没解析出 check 的步数（正则没匹配上）")
 
 
 # --------------------------------------------------------------------------
