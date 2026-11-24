@@ -508,6 +508,113 @@
     });
   }
 
+  /* ================= Agent 契约抽屉 ================= */
+  /* 为什么要有它：侧栏那四个 Agent 之前是**写死的按钮、没绑任何事件** ——
+     点了没反应，看起来像界面坏了。其实后端一直有角色契约（GET /agents），
+     只是界面没把它露出来。现在点开就能看到：做什么 / 不做什么 / 工具接口；
+     "仅声明"的角色会明确写出"本期未实现，写接口永不真正执行"。
+
+     兼容性：抽屉**运行时创建**，所以三个页面共用一份实现；
+     数据在**点击时**才取（api 模式打 /agents，mock 模式用 data.js 的副本），
+     不影响首屏加载，也不影响渲染层审核的 DOM 桩。 */
+  let AGENT_CACHE = null;
+
+  function ensureAgentDrawer() {
+    let drawer = $('#agent-drawer');
+    if (drawer) return drawer;
+    drawer = document.createElement('div');
+    drawer.className = 'drawer';
+    drawer.id = 'agent-drawer';
+    drawer.setAttribute('aria-hidden', 'true');
+    drawer.innerHTML =
+      '<div class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="agent-drawer-title">'
+      + '<div class="drawer-head"><div>'
+      + '<div class="drawer-eyebrow" id="agent-drawer-eyebrow">Agent 契约</div>'
+      + '<h2 class="drawer-title" id="agent-drawer-title">—</h2></div>'
+      + '<button type="button" class="drawer-close" id="agent-drawer-close" aria-label="关闭">×</button></div>'
+      + '<div class="drawer-body" id="agent-drawer-body"></div></div>';
+    document.body.appendChild(drawer);
+    return drawer;
+  }
+
+  async function getAgents() {
+    if (currentSource === 'api' && window.TDApi && window.TDApi.loadAgents) {
+      try {
+        const list = await window.TDApi.loadAgents();
+        if (list && list.length) { AGENT_CACHE = list; return list; }
+      } catch (err) {
+        toast('读取角色契约失败：' + err.message, 'danger');
+      }
+    }
+    return AGENT_CACHE || (D.agents || []);
+  }
+
+  function agentPanelHtml(a) {
+    const declared = a.status === 'declared_only';
+    const items = (arr) => (arr || []).map(x => '<li>' + esc(x) + '</li>').join('');
+    const rows = (a.tools || []).map(t => {
+      const mode = t.mode === 'write' ? '写' : '只读';
+      const impl = t.implemented ? '已实现'
+        : (t.mode === 'write' ? '已声明 · 永不真正执行' : '已声明 · 本期不实现');
+      return '<tr><td>' + esc(t.name) + '</td><td>' + mode + '</td><td>' + impl + '</td></tr>';
+    }).join('');
+    return ''
+      + (declared
+        ? '<div class="drawer-note is-warn"><b>本期未实现</b>：只做角色声明与工具接口，不执行任何实际动作；'
+          + '写接口按 PRD 声明为「永不真正执行」。</div>'
+        : '<div class="drawer-note is-ok"><b>本期已实现</b>：由调度器 Supervisor 调用；'
+          + '只产出草稿，绝不自动对外发送。</div>')
+      + '<div class="drawer-grid">'
+      + '<section><h3>做什么</h3><ul class="drawer-list">' + items(a.scope_included) + '</ul></section>'
+      + '<section><h3>不做什么</h3><ul class="drawer-list is-off">' + items(a.scope_excluded) + '</ul></section>'
+      + '</div>'
+      + '<h3>工具接口</h3>'
+      + '<table class="drawer-table"><thead><tr><th>工具</th><th>模式</th><th>实现状态</th></tr></thead><tbody>'
+      + (rows || '<tr><td colspan="3">—</td></tr>') + '</tbody></table>'
+      + '<div class="drawer-foot">契约来源：后端角色注册表 <code>GET /agents</code>（AgentSpec）</div>';
+  }
+
+  async function openAgentDrawer(agentId) {
+    const drawer = ensureAgentDrawer();
+    const body = $('#agent-drawer-body');
+    const title = $('#agent-drawer-title');
+    const eyebrow = $('#agent-drawer-eyebrow');
+    if (!body || !title) return;
+    const list = await getAgents();
+    const a = list.find(x => x.agent_id === agentId);
+    if (a) {
+      title.textContent = (a.display_name || a.agent_id) + ' · ' + (a.agent_id || '');
+      if (eyebrow) {
+        eyebrow.textContent = a.status === 'declared_only' ? '仅声明角色 · 本期未实现' : '本期已实现';
+      }
+      body.innerHTML = agentPanelHtml(a);
+    } else {
+      title.textContent = agentId || '角色';
+      if (eyebrow) eyebrow.textContent = 'Agent 契约';
+      body.innerHTML = '<div class="drawer-note is-warn">后端没有声明这个角色。</div>';
+    }
+    drawer.classList.add('is-open');
+    drawer.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeAgentDrawer() {
+    const drawer = $('#agent-drawer');
+    if (!drawer) return;
+    drawer.classList.remove('is-open');
+    drawer.setAttribute('aria-hidden', 'true');
+  }
+
+  function initAgentRail() {
+    $$('[data-agent-id]').forEach(b => {
+      b.addEventListener('click', () => openAgentDrawer(b.dataset.agentId));
+    });
+    const close = $('#agent-drawer-close');
+    if (close) close.addEventListener('click', closeAgentDrawer);
+    const drawer = $('#agent-drawer');
+    if (drawer) drawer.addEventListener('click', e => { if (e.target === drawer) closeAgentDrawer(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAgentDrawer(); });
+  }
+
   /* ================= 运营看板 ================= */
   function initDashboard() {
     const s = $('#stage-chart');
@@ -661,6 +768,6 @@
       applyUser(u);
     }
     await loadSource();
-    initWorkbench(); initDashboard(); initKnowledge();
+    initWorkbench(); initDashboard(); initKnowledge(); initAgentRail();
   });
 })();

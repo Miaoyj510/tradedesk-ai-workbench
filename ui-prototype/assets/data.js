@@ -331,6 +331,51 @@ window.TD = (function () {
     { t: '引用装配', d: '带标识与有效期' }
   ];
 
+  /* 角色契约（mock 副本）：与后端 GET /agents 的形状一致。
+     mock 模式下点侧栏 Agent 也要能讲清楚"做什么/不做什么/工具"——
+     死标签会让人以为界面坏了。 */
+  const agents = [
+    {
+      agent_id: 'inquiry.reply', display_name: 'Inquiry', status: 'active',
+      scope_included: ['意图识别（询盘五类）', '产品匹配', '回复草稿生成', '引用装配', '跟进建议'],
+      scope_excluded: ['报价决策', '合同', '投放', '任何写操作', '自动发送'],
+      tools: [
+        { name: 'kb.search', mode: 'read_only', implemented: true },
+        { name: 'kb.get_product', mode: 'read_only', implemented: true },
+        { name: 'kb.get_certificate', mode: 'read_only', implemented: true },
+        { name: 'crm.read_profile', mode: 'read_only', implemented: true }
+      ]
+    },
+    {
+      agent_id: 'sentinel.risk', display_name: 'Sentinel', status: 'active',
+      scope_included: ['名单核验', '受控国别判定', '风险分级', '证据链输出'],
+      scope_excluded: ['代替人做放行决定', '生成对外回复', '写操作'],
+      tools: [
+        { name: 'risk.screen_entity', mode: 'read_only', implemented: true },
+        { name: 'risk.screen_item', mode: 'read_only', implemented: true },
+        { name: 'kb.regulation_query', mode: 'read_only', implemented: true }
+      ]
+    },
+    {
+      agent_id: 'merch.listing', display_name: 'Merch', status: 'declared_only',
+      scope_included: ['商品运营（Listing 生成与上架）'],
+      scope_excluded: ['本期不实现任何能力'],
+      tools: [
+        { name: 'listing.generate', mode: 'read_only', implemented: false },
+        { name: 'listing.publish', mode: 'write', implemented: false }
+      ]
+    },
+    {
+      agent_id: 'growth.campaign', display_name: 'Growth', status: 'declared_only',
+      scope_included: ['推广建议（不含自动调预算）'],
+      scope_excluded: ['本期不实现任何能力', '自动调整预算', '自动投放'],
+      tools: [
+        { name: 'campaign.suggest', mode: 'read_only', implemented: false },
+        { name: 'campaign.execute', mode: 'write', implemented: false }
+      ]
+    }
+  ];
+
   const demoScripts = [
     { id: 'T-1042', label: '脚本 A · 英语询价（引用与闸门）' },
     { id: 'T-1051', label: '脚本 B · 西语跨语种召回（中文产品库）' },
@@ -338,5 +383,5 @@ window.TD = (function () {
     { id: 'T-1046', label: '脚本 D · 歧义追问（不猜价格）' }
   ];
 
-  return { STAGE, INTENT, threads, kpis, stages, quality, costByLang, costTrend, riskEvents, gates, kbAssets, terms, pipeline, demoScripts };
+  return { STAGE, INTENT, threads, kpis, stages, quality, costByLang, costTrend, riskEvents, gates, kbAssets, terms, pipeline, demoScripts, agents };
 })();

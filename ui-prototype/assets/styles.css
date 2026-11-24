@@ -354,3 +354,34 @@ tbody tr:hover{background:var(--color-surface-alt)}
   .term-row{grid-template-columns:1fr 1fr}
   .term-row.head{display:none}
 }
+
+/* ---------- Agent 契约抽屉 ---------- */
+.drawer{position:fixed;inset:0;background:rgba(15,23,42,.45);display:none;z-index:60}
+.drawer.is-open{display:block}
+.drawer-panel{position:absolute;top:0;right:0;height:100%;width:min(520px,92vw);background:var(--color-surface);
+  box-shadow:-14px 0 44px rgba(15,23,42,.20);display:flex;flex-direction:column;animation:drawer-in .18s ease-out}
+@keyframes drawer-in{from{transform:translateX(16px);opacity:.6}to{transform:none;opacity:1}}
+.drawer-head{display:flex;align-items:flex-start;gap:var(--space-lg);padding:var(--space-2xl);
+  border-bottom:1px solid var(--color-border)}
+.drawer-eyebrow{font-size:var(--fs-xs);letter-spacing:.12em;text-transform:uppercase;color:var(--color-muted-foreground)}
+.drawer-title{margin:var(--space-xs) 0 0;font-size:var(--fs-xl);letter-spacing:-.2px}
+.drawer-close{margin-left:auto;width:30px;height:30px;border-radius:var(--radius-sm);border:1px solid var(--color-border);
+  background:var(--color-surface);color:var(--color-muted-foreground);font-size:18px;line-height:1;cursor:pointer}
+.drawer-close:hover{background:var(--color-muted);color:var(--color-foreground)}
+.drawer-body{padding:var(--space-2xl);overflow:auto}
+.drawer-body h3{margin:var(--space-2xl) 0 var(--space-md);font-size:var(--fs-sm);letter-spacing:.06em;
+  text-transform:uppercase;color:var(--color-muted-foreground)}
+.drawer-note{border-radius:var(--radius-md);padding:var(--space-lg);font-size:var(--fs-sm);line-height:1.6;margin-bottom:var(--space-lg)}
+.drawer-note.is-ok{background:#ECFDF5;color:#065F46;border:1px solid #A7F3D0}
+.drawer-note.is-warn{background:#FFFBEB;color:#92400E;border:1px solid #FDE68A}
+.drawer-grid{display:grid;grid-template-columns:1fr 1fr;gap:var(--space-xl)}
+.drawer-grid h3{margin-top:0}
+.drawer-list{margin:0;padding-left:var(--space-xl);font-size:var(--fs-base);line-height:1.8}
+.drawer-list.is-off{color:var(--color-muted-foreground)}
+.drawer-table{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
+.drawer-table th,.drawer-table td{text-align:left;padding:var(--space-md);border-bottom:1px solid var(--color-border)}
+.drawer-table th{color:var(--color-muted-foreground);font-weight:500;font-size:var(--fs-xs);letter-spacing:.06em;
+  text-transform:uppercase}
+.drawer-foot{margin-top:var(--space-2xl);padding-top:var(--space-lg);border-top:1px solid var(--color-border);
+  font-size:var(--fs-xs);color:var(--color-muted-foreground)}
+.drawer-foot code{background:var(--color-muted);border-radius:var(--radius-sm);padding:1px 5px}

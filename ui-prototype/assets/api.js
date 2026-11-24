@@ -117,5 +117,11 @@ window.TDApi = (function () {
     return await req('/inbound', { method: 'POST', body: payload });
   }
 
-  return { loadWorkbench, kbSearch, gateToken, signoff, send, inbound, scenarios: SCENARIOS, req: req };
+  /* 角色契约（AgentSpec）：侧栏点 Agent 就看这个。
+     真实数据模式从后端取；mock 模式用 data.js 里的静态副本。 */
+  async function loadAgents() {
+    return await req('/agents');
+  }
+
+  return { loadWorkbench, kbSearch, gateToken, signoff, send, inbound, loadAgents, scenarios: SCENARIOS, req: req };
 })();
