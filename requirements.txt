@@ -8,3 +8,6 @@ psycopg[binary]>=3.2
 fastapi>=0.115
 uvicorn>=0.34
 httpx>=0.28
+
+# S4-4c 续：公开基准体检层（读 parquet；datasets 本身不入库，用 scripts/fetch_datasets.py 现取）
+pyarrow>=17
