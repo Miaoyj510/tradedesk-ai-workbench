@@ -107,6 +107,17 @@ def mount_ui(app: FastAPI) -> bool:
         return False
     app.mount("/ui", StaticFiles(directory=str(ui_dir), html=True), name="ui")
 
+    # **不缓存**：本地 Demo 里前端文件改得很勤，浏览器缓存住旧 JS 会让人
+    # 以为"改了没生效"（比如侧栏按钮点了没反应 —— 其实跑的是缓存里的旧文件）。
+    # 生产环境当然要用带指纹的静态资源 + 长缓存，这里是开发形态，取"永远最新"。
+    # （StaticFiles 不收 headers 参数，所以走中间件。）
+    @app.middleware("http")
+    async def _no_store_ui(request, call_next):
+        resp = await call_next(request)
+        if request.url.path.startswith("/ui"):
+            resp.headers["Cache-Control"] = "no-store, must-revalidate"
+        return resp
+
     @app.get("/", include_in_schema=False)
     def _ui_index():
         return RedirectResponse(url="/ui/index.html")
