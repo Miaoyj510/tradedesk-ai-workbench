@@ -89,64 +89,77 @@ switch ($Command.ToLower()) {
     $DsnArgs = @()
     if ($Dsn) { $DsnArgs = @("--dsn", $Dsn) }
     Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "[check 1/10] Python 语法检查（src / tests / scripts）" -ForegroundColor Cyan
+    Write-Host "[check 1/11] Python 语法检查（src / tests / scripts）" -ForegroundColor Cyan
     $py = Get-PythonExe
     & $py -m compileall -q (Join-Path $Root "src") (Join-Path $Root "tests") (Join-Path $Root "scripts")
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 语法检查未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ 语法检查通过" -ForegroundColor Green
 
-    Write-Host "[check 2/10] S1 验证（SQLite + PostgreSQL 双后端）" -ForegroundColor Cyan
+    Write-Host "[check 2/11] S1 验证（SQLite + PostgreSQL 双后端）" -ForegroundColor Cyan
     if ($DsnArgs.Count -gt 0) { & $py (Join-Path $Root "scripts\verify_s1.py") --backend both @DsnArgs }
     else { & $py (Join-Path $Root "scripts\verify_s1.py") --backend both }
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 验证未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ 验证通过" -ForegroundColor Green
 
-      Write-Host "[check 3/10] S2 验证（编排运行时 + HTTP 接口 + 闸门）" -ForegroundColor Cyan
+      Write-Host "[check 3/11] S2 验证（编排运行时 + HTTP 接口 + 闸门）" -ForegroundColor Cyan
       & $py (Join-Path $Root "scripts\verify_s2.py")
       if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S2 验证未通过" -ForegroundColor Red; exit 1 }
       Write-Host "  ✓ S2 验证通过" -ForegroundColor Green
 
 
-    Write-Host "[check 4/10] S3 验证（检索层：多语种 / 时效 / 引用）" -ForegroundColor Cyan
+    Write-Host "[check 4/11] S3 验证（检索层：多语种 / 时效 / 引用）" -ForegroundColor Cyan
     if ($DsnArgs.Count -gt 0) { & $py (Join-Path $Root "scripts\verify_s3.py") @DsnArgs }
     else { & $py (Join-Path $Root "scripts\verify_s3.py") }
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S3 验证未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ S3 验证通过" -ForegroundColor Green
 
-    Write-Host "[check 5/10] S2 独立审核（审核方断言，非自证）" -ForegroundColor Cyan
+    Write-Host "[check 5/11] S2 独立审核（审核方断言，非自证）" -ForegroundColor Cyan
     if ($DsnArgs.Count -gt 0) { & $py (Join-Path $Root "scripts\audit_s2.py") @DsnArgs }
     else { & $py (Join-Path $Root "scripts\audit_s2.py") }
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S2 独立审核未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ S2 独立审核通过" -ForegroundColor Green
 
-    Write-Host "[check 6/10] pytest 单元测试" -ForegroundColor Cyan
+    Write-Host "[check 6/11] pytest 单元测试" -ForegroundColor Cyan
     if ($Dsn) { $env:TRADEDESK_TEST_DSN = $Dsn }
     & $py -m pytest -q --basetemp (Join-Path $Root ".pytest_tmp")
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ 测试未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ 测试通过" -ForegroundColor Green
 
-    Write-Host "[check 7/10] S3 独立审核（审核方断言，非自证）" -ForegroundColor Cyan
+    Write-Host "[check 7/11] S3 独立审核（审核方断言，非自证）" -ForegroundColor Cyan
     if ($DsnArgs.Count -gt 0) { & $py (Join-Path $Root "scripts\audit_s3.py") @DsnArgs }
     else { & $py (Join-Path $Root "scripts\audit_s3.py") }
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S3 独立审核未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ S3 独立审核通过" -ForegroundColor Green
 
-    Write-Host "[check 8/10] S4 验证（向量层：嵌入契约 / 向量存储 / 索引 / 余弦检索）" -ForegroundColor Cyan
+    Write-Host "[check 8/11] S4 验证（向量层：嵌入契约 / 向量存储 / 索引 / 余弦检索）" -ForegroundColor Cyan
     if ($DsnArgs.Count -gt 0) { & $py (Join-Path $Root "scripts\verify_s4.py") @DsnArgs }
     else { & $py (Join-Path $Root "scripts\verify_s4.py") }
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S4 验证未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ S4 验证通过" -ForegroundColor Green
 
-    Write-Host "[check 9/10] S4 独立审核（审核方断言，非自证）" -ForegroundColor Cyan
+    Write-Host "[check 9/11] S4 独立审核（审核方断言，非自证）" -ForegroundColor Cyan
     if ($DsnArgs.Count -gt 0) { & $py (Join-Path $Root "scripts\audit_s4.py") @DsnArgs }
     else { & $py (Join-Path $Root "scripts\audit_s4.py") }
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S4 独立审核未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ S4 独立审核通过" -ForegroundColor Green
 
-    Write-Host "[check 10/10] S5 独立审核（审核方断言，非自证；S5 不在门禁里就会回归失控）" -ForegroundColor Cyan
+    Write-Host "[check 10/11] S5 独立审核（审核方断言，非自证；S5 不在门禁里就会回归失控）" -ForegroundColor Cyan
     & $py (Join-Path $Root "scripts\audit_s5.py")
     if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S5 独立审核未通过" -ForegroundColor Red; exit 1 }
     Write-Host "  ✓ S5 独立审核通过" -ForegroundColor Green
+
+    Write-Host "[check 11/11] S6 独立审核（审核方断言：读模型 / 写操作闸门 / 口径 / 渲染层）" -ForegroundColor Cyan
+    # ⚠️ audit_s6 的 --dsn 指向的库会被它**DROP 后重建**（脚本自建暂存库并回收）。
+    # 所以这里**绝不能**把开发库（tradedesk_a / tradedesk_b）传进去 ——
+    # 传进去等于删开发库。改成从给定 DSN 派生一个独立暂存库名。
+    $audit6Args = @()
+    if ($Dsn) {
+      $head = $Dsn.Substring(0, $Dsn.LastIndexOf("/") + 1)
+      $audit6Args = @("--dsn", ($head + "tradedesk_audit_s6"))
+    }
+    & $py (Join-Path $Root "scripts\audit_s6.py") @audit6Args
+    if ($LASTEXITCODE -ne 0) { Write-Host "  ✗ S6 独立审核未通过" -ForegroundColor Red; exit 1 }
+    Write-Host "  ✓ S6 独立审核通过" -ForegroundColor Green
 
     Write-Host "==============================================" -ForegroundColor Cyan
     Write-Host "全部检查通过。项目状态良好。" -ForegroundColor Green
@@ -182,10 +195,15 @@ switch ($Command.ToLower()) {
   }
   "audit6" {
     $py = Get-PythonExe
-    Write-Host "[audit6] 运行 S6 独立审核（审核 agent 的断言，非自证；渲染层需 node）" -ForegroundColor Cyan
-    $audit6Args = @()
-    if ($Dsn) { $audit6Args = @("--dsn", $Dsn) }
-    & $py (Join-Path $Root "scripts/audit_s6.py") @audit6Args
+    Write-Host "[audit6] 运行 S6 独立审核（审核 agent 的断言：读模型 + 写操作闸门 + 口径 + 渲染层）" -ForegroundColor Cyan
+    # ⚠️ --dsn 指向的库会被 audit_s6 **DROP 后重建**（自建暂存库并回收）。
+    # 因此这里把传入 DSN 的库名替换成独立暂存库，避免误删开发库。
+    if ($Dsn) {
+      $head = $Dsn.Substring(0, $Dsn.LastIndexOf("/") + 1)
+      & $py (Join-Path $Root "scripts\audit_s6.py") --dsn ($head + "tradedesk_audit_s6")
+    } else {
+      & $py (Join-Path $Root "scripts\audit_s6.py")
+    }
     exit $LASTEXITCODE
   }
   "index" {
@@ -260,14 +278,14 @@ TradeDesk-AI 开发脚本（项目根：$Root）
   verify   跑 S1 验证（可选参数 -Backend sqlite|postgres|both，默认 both）
   test     跑 pytest
   status   查看容器与端口
-  check    交付前自检（十步，含 S5 独立审核）：语法 + 双后端 + S2/S3 自证 + S2/S3/S4 独立审核 + S4 + pytest
+  check    交付前自检（十一步，含 S5/S6 独立审核）：语法 + 双后端 + S2/S3 自证 + S2/S3/S4 独立审核 + S4 + pytest
   audit    S2 独立审核（审核 agent 断言，见 docs/S2-AUDIT-R9.md；R9 缺陷修完前为红）
   audit3   S3 独立审核（审核 agent 断言，见 docs/S3-AUDIT-R11.md；R11 缺陷修完前为红）
   serve    启动 HTTP 接口（FastAPI，/docs 有接口文档）
   push     推送当前分支到 GitHub（git 优先，失败自动切 API）
   audit4   S4 独立审核（审核 agent 断言，见 docs/S4-AUDIT-R15.md；R15 缺陷修完前为红）
-  audit5   S5 独立审核（审核 agent 断言，见 docs/S5-AUDIT-R19.md；R19 缺陷修完前为红）
-  audit6   S6 独立审核（审核 agent 断言，见 docs/S6-AUDIT-R20.md；R20 缺陷修完前为红）
+  audit5   S5 独立审核（审核 agent 断言，见 docs/S5-AUDIT-R19.md）
+  audit6   S6 独立审核（审核 agent 断言，见 docs/S6-AUDIT-R21.md 与 docs/S6-ACCEPTANCE.md）
   index    建立知识库向量索引（显式动作，会调云端 API）
   eval     分语种分通道检索评测（S4-4c 自建语料层）
   evallm  模型层分语种评测（S5-1c；加 -Live 才跑真实云端，会产生费用）

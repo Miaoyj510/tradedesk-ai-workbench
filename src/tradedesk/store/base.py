@@ -45,6 +45,12 @@ def summarize_llm_usage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     max_cost: Optional[float] = None
     by_lang: Dict[str, Dict[str, Any]] = {}
     by_day: Dict[str, Dict[str, Any]] = {}
+    # 询盘条数（distinct thread_id）—— PRD 12.4 的硬指标是"元/条询盘"，
+    # 分母必须是**询盘条数**而不是调用次数（R21-05）。
+    # 一条询盘要走对话 + 嵌入 + 可能的重排，用调用次数当分母会把成本摊薄到 1/3~1/4。
+    all_threads: set = set()
+    lang_threads: Dict[str, set] = {}
+    day_threads: Dict[str, set] = {}
     for r in rows:
         for k in tokens:
             tokens[k] += int(r.get(k) or 0)
@@ -60,6 +66,10 @@ def summarize_llm_usage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                                            "cost_cny": 0.0, "priced_count": 0})
         bucket["count"] += 1
         bucket["total_tokens"] += int(r.get("total_tokens") or 0)
+        tid = str(r.get("thread_id") or "")
+        if tid:
+            all_threads.add(tid)
+            lang_threads.setdefault(lang, set()).add(tid)
         # 按日（S6 看板的成本趋势折线用）
         ts = str(r.get("ts") or "")
         day = ts[:10]
@@ -68,6 +78,8 @@ def summarize_llm_usage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                                          "cost_cny": 0.0, "priced_count": 0})
             db["count"] += 1
             db["total_tokens"] += int(r.get("total_tokens") or 0)
+            if tid:
+                day_threads.setdefault(day, set()).add(tid)
         if cost is not None:
             c = float(cost)
             total_cost += c
@@ -78,8 +90,13 @@ def summarize_llm_usage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
                 by_day[day]["cost_cny"] += c
                 by_day[day]["priced_count"] += 1
             max_cost = c if max_cost is None else max(max_cost, c)
+    for lang, bucket in by_lang.items():
+        bucket["thread_count"] = len(lang_threads.get(lang, ()))
+    for day, bucket in by_day.items():
+        bucket["thread_count"] = len(day_threads.get(day, ()))
     out: Dict[str, Any] = {
         "count": len(rows),
+        "thread_count": len(all_threads),
         "prompt_tokens": tokens["prompt_tokens"],
         "completion_tokens": tokens["completion_tokens"],
         "cached_tokens": tokens["cached_tokens"],

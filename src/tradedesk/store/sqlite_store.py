@@ -554,8 +554,10 @@ class SqliteStateStore:
     def llm_usage_summary(self, lang: Optional[str] = None,
                           thread_id: Optional[str] = None) -> Dict[str, Any]:
         """按语种 / 线程汇总成本（口径见 store/base.py 的 summarize_llm_usage）。"""
-        sql = ("SELECT lang, prompt_tokens, completion_tokens, cached_tokens, total_tokens, "
-               "http_calls, cost_cny, degraded, ts FROM llm_usage WHERE 1=1")
+        # 必须 SELECT thread_id：单位成本的分母是**询盘条数**（distinct thread_id），
+        # 不是调用次数（R21-05）。少了这一列，thread_count 恒为 0。
+        sql = ("SELECT lang, thread_id, prompt_tokens, completion_tokens, cached_tokens, "
+               "total_tokens, http_calls, cost_cny, degraded, ts FROM llm_usage WHERE 1=1")
         args: List[Any] = []
         if lang:
             sql += " AND lang = ?"

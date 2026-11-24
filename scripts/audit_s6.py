@@ -21,8 +21,8 @@
 
 审核轮次
 --------
-- **R20：S6-1a 工作台读模型（BFF）+ S6-1b 前端接真数据**
-  结论见 `docs/S6-AUDIT-R20.md`。
+- **R21：S6-1a 工作台读模型（BFF）+ S6-1b 前端接真数据**
+  结论见 `docs/S6-AUDIT-R21.md`。
 
 用法
     python scripts/audit_s6.py
@@ -392,7 +392,7 @@ def audit_static() -> None:
           "esc(d.body)" in app, "app.js 里草稿正文没有走 esc()")
 
     # F3 FR-ORC-10 的四类筛选（注意：不能用子串 "wait" —— await 里也有）
-    uses_wait = re.search(r"\.wait", app) is not None
+    uses_wait = re.search(r"\.wait\b", app) is not None
     check("线程看板支持第 4 类筛选：等待人审时长（FR-ORC-10）",
           uses_wait, "app.js 里没有任何按 t.wait（等待人审时长）筛选或排序的逻辑")
 

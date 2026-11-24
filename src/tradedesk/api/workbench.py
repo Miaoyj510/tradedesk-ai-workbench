@@ -137,7 +137,7 @@ def _buyer_message(events) -> str:
 
 
 # 事件 → 时间线文案（前端展示用）
-def _timeline(events) -> List[Dict[str, Any]]:
+def _timeline(events, now: datetime) -> List[Dict[str, Any]]:
     out = []
     for e in events:
         p = e.payload or {}
@@ -173,11 +173,27 @@ def _timeline(events) -> List[Dict[str, Any]]:
             text = "阶段推进被拒：%s" % (p.get("reason") or "")
         if text is None:
             continue
-        out.append({"time": e.ts.strftime("%H:%M"), "text": text, "accent": accent})
+        out.append({"time": _fmt_when(e.ts, now), "text": text, "accent": accent})
     return out
 
 
-def _messages(events, company: str) -> List[Dict[str, Any]]:
+def _fmt_when(ts: datetime, now: datetime) -> str:
+    """相对日期的时间标签。
+
+    **不能恒为"今天"**（R21-12c）：本项目的核心卖点是跨天跨周的询盘线程，
+    会话栏与审计时间线都丢掉日期，正好打在卖点上。
+    """
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=now.tzinfo)
+    d = (ts.date() - now.date()).days
+    if d == 0:
+        return "今天 " + ts.strftime("%H:%M")
+    if d == 1:
+        return "昨天 " + ts.strftime("%H:%M")
+    return ts.strftime("%m-%d %H:%M")
+
+
+def _messages(events, company: str, now: datetime) -> List[Dict[str, Any]]:
     """买家原话（前端会话栏）。"""
     out = []
     for e in events:
@@ -187,7 +203,7 @@ def _messages(events, company: str) -> List[Dict[str, Any]]:
         out.append({
             "who": "buyer",
             "name": p.get("company") or company,
-            "time": e.ts.strftime("今天 %H:%M"),
+            "time": _fmt_when(e.ts, now),
             "lang": p.get("language") or "",
             "text": p.get("message") or "",
             "attach": "",
@@ -279,8 +295,8 @@ def _thread_payload(ctx, thread, now: datetime) -> Dict[str, Any]:
                     "hit": bool(hit_map.get(g.gate_id.value))} for g in gates],
         "events": [{"seq": e.seq, "type": e.event_type.value, "actor": e.actor.value,
                     "ts": e.ts.isoformat(), "payload": e.payload} for e in events],
-        "messages": _messages(events, company),
-        "timeline": _timeline(events),
+        "messages": _messages(events, company, now),
+        "timeline": _timeline(events, now),
         "evidence": _evidence(events),
         "signed_off": bool(thread.price_signed_off),
         "sent_at": thread.sent_at.isoformat() if thread.sent_at else None,
@@ -301,7 +317,7 @@ def _kpis(ctx, threads, now: datetime) -> Dict[str, Any]:
         lefts = [x for x in lefts if x is not None]
         if lefts and min(lefts) <= 60:
             sla_soon += 1
-    sent = sum(1 for t in threads if t.sent_at is not None)
+    sent_count = sum(1 for t in threads if t.sent_at is not None)
     usage = ctx.store.llm_usage_summary()
     cost_today = 0.0
     today = now.date().isoformat()
@@ -326,42 +342,68 @@ def _kpis(ctx, threads, now: datetime) -> Dict[str, Any]:
     for t in threads:
         evs = ctx.store.list_events(t.thread_id)
         recv = next((e for e in evs if e.event_type == EventType.MESSAGE_RECEIVED), None)
-        sent = next((e for e in evs if e.event_type == EventType.SENT), None)
-        if recv is not None and sent is not None:
-            sent_deltas.append((sent.ts - recv.ts).total_seconds())
+        # 注意变量名（R21-07）：原来这里也叫 `sent`，把上面统计线程数的 `sent` 覆盖了，
+        # 于是 kpis.sent 返回的是 None 或一个事件对象，而不是数字。
+        sent_ev = next((e for e in evs if e.event_type == EventType.SENT), None)
+        if recv is not None and sent_ev is not None:
+            sent_deltas.append((sent_ev.ts - recv.ts).total_seconds())
     avg_first_signed = "—"
     if sent_deltas:
         avg = int(sum(sent_deltas) / len(sent_deltas))
         avg_first_signed = "%d 分 %d 秒" % (avg // 60, avg % 60)
+    # draftReady = **真正有草稿正文**的线程数（R21-06）。
+    # 原来写的是"线程数 − 待签核数"，那会把名单阻断（不生成任何回复）
+    # 和已发送的线程都算成"草稿就绪"，口径既不等于"有草稿的线程数"，
+    # 也不等于界面上的"草稿可用率 %"。
+    draft_ready = 0
+    for t in threads:
+        d = ctx.supervisor.get_draft(t.thread_id)
+        if d is not None and (d.body or "").strip():
+            draft_ready += 1
     return {
         "pending": pending,
         "slaSoon": sla_soon,
         "costToday": round(cost_today, 4),
-        "budget": 2.4,
-        "sent": sent,
+        # 不给"预算"这个无出处的常量（R21-08）：mock 里的 2.4 是"当日预算 ¥2.40"，
+        # 与 PRD 12.4 的"≤0.2 元/条"根本不是一个口径，差 12 倍。
+        # 改成能自证的写法：当日成本 + PRD 的硬指标本身。
+        "costHardCapPerInquiry": 0.2,
+        "costUnit": "元/条询盘",
+        "costThreadCount": usage.get("thread_count", 0),
+        "sent": sent_count,
         "avgFirstResponse": avg_first,
         "avgFirstResponseSigned": avg_first_signed,
-        "draftReady": len(threads) - pending,
+        "draftReady": draft_ready,
         "pricedCount": usage.get("priced_count", 0),
         "usageCount": usage.get("count", 0),
     }
 
 
 def _cost_series(usage: Dict[str, Any]) -> Dict[str, Any]:
+    """成本序列 —— **分母是询盘条数，不是调用次数**（R21-05）。
+
+    PRD 12.4 的硬指标是"单位询盘 Token 成本 ≤ 0.2 元/条"，分母就是**询盘条数**。
+    一条询盘要走对话 + 嵌入 + 可能的重排，用调用次数当分母会把数字摊薄到 1/3~1/4
+    —— 那是"元/次模型调用"，不是"元/条询盘"，两者不能混用。
+    调用次数单独给一列（`calls`），不混进单位成本。
+    """
     by_lang = []
     for lang, b in sorted((usage.get("by_lang") or {}).items()):
-        n = int(b.get("count") or 0)
-        if n <= 0:
+        inquiries = int(b.get("thread_count") or 0)
+        calls = int(b.get("count") or 0)
+        if inquiries <= 0:
             continue
-        by_lang.append({"lang": lang, "n": n,
-                         "y": round(float(b.get("cost_cny") or 0.0) / n, 6)})
+        by_lang.append({"lang": lang, "n": inquiries, "calls": calls,
+                         "y": round(float(b.get("cost_cny") or 0.0) / inquiries, 6)})
     trend = []
     for day in sorted((usage.get("by_day") or {}).keys()):
         b = usage["by_day"][day]
-        n = int(b.get("count") or 0)
-        if n <= 0:
+        inquiries = int(b.get("thread_count") or 0)
+        calls = int(b.get("count") or 0)
+        if inquiries <= 0:
             continue
-        trend.append({"d": day[5:], "v": round(float(b.get("cost_cny") or 0.0) / n, 6)})
+        trend.append({"d": day[5:], "n": inquiries, "calls": calls,
+                      "v": round(float(b.get("cost_cny") or 0.0) / inquiries, 6)})
     return {"costByLang": by_lang, "costTrend": trend}
 
 

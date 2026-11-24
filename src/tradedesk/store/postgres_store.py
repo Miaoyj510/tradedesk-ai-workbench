@@ -422,8 +422,10 @@ class PostgresStateStore:
     def llm_usage_summary(self, lang: Optional[str] = None,
                           thread_id: Optional[str] = None) -> Dict[str, Any]:
         """按语种 / 线程汇总成本（口径与 SQLite 一致）。"""
-        sql = ("SELECT lang, prompt_tokens, completion_tokens, cached_tokens, total_tokens, "
-               "http_calls, cost_cny, degraded, ts FROM llm_usage WHERE TRUE")
+        # 必须 SELECT thread_id：单位成本的分母是**询盘条数**（distinct thread_id），
+        # 不是调用次数（R21-05）。与 SQLite 侧口径完全一致。
+        sql = ("SELECT lang, thread_id, prompt_tokens, completion_tokens, cached_tokens, "
+               "total_tokens, http_calls, cost_cny, degraded, ts FROM llm_usage WHERE TRUE")
         args: List[Any] = []
         if lang:
             sql += " AND lang = %s"
@@ -433,9 +435,10 @@ class PostgresStateStore:
             args.append(thread_id)
         with self.conn.cursor() as cur:
             cur.execute(sql, args)
-            rows = [{"lang": r[0], "prompt_tokens": r[1], "completion_tokens": r[2],
-                     "cached_tokens": r[3], "total_tokens": r[4], "http_calls": r[5],
-                     "cost_cny": r[6], "degraded": r[7],
+            rows = [{"lang": r[0], "thread_id": r[1],
+                     "prompt_tokens": r[2], "completion_tokens": r[3],
+                     "cached_tokens": r[4], "total_tokens": r[5], "http_calls": r[6],
+                     "cost_cny": r[7], "degraded": r[8],
                      "ts": r[8].isoformat() if r[8] else ""} for r in cur.fetchall()]
         return summarize_llm_usage(rows)
 

@@ -44,10 +44,12 @@
         <div class="sub">线程漏斗 · 单位成本 · 分语种质量 · 风险事件</div>
       </div>
       <div class="kpis">
-        <div class="kpi"><span class="kpi-label">今日已发送</span><span class="kpi-value">41</span></div>
-        <div class="kpi"><span class="kpi-label">草稿可用率</span><span class="kpi-value">78<small>%</small></span></div>
-        <div class="kpi"><span class="kpi-label">首响中位数</span><span class="kpi-value" style="font-size:14px">3 分 12 秒</span></div>
-        <div class="kpi"><span class="kpi-label">今日单位成本</span><span class="kpi-value">¥0.046 <small>/ 目标 ≤ ¥0.20</small></span></div>
+        <!-- 四个 KPI 全部由读模型驱动（B11）：原来写死 41 / 78% / 3 分 12 秒 / ¥0.046，
+             而 app.js 从不写它们 → 真数据模式下仍在显示 mock 数字。 -->
+        <div class="kpi"><span class="kpi-label">今日已发送</span><span class="kpi-value" id="kpi-sent">—</span></div>
+        <div class="kpi"><span class="kpi-label">草稿就绪数</span><span class="kpi-value" id="kpi-draft-ready">—</span></div>
+        <div class="kpi"><span class="kpi-label">首响中位数</span><span class="kpi-value" id="kpi-first-response" style="font-size:14px">—</span></div>
+        <div class="kpi"><span class="kpi-label">今日单位成本</span><span class="kpi-value" id="kpi-unit-cost" style="font-size:13px">—</span></div>
       </div>
     </header>
 
@@ -58,17 +60,20 @@
         <div class="panel-hd"><h2>上线门槛（Go / No-Go）</h2><span class="hint">任一硬指标不达标即 No-Go</span></div>
         <div class="panel-body">
           <div class="grid-3">
-            <div class="card" style="box-shadow:none;padding:16px;border-color:#A7F3D0">
-              <div class="stat-line"><span class="v">100%</span><span class="l">引用正确率</span></div>
-              <div class="threshold">三语全部达标（硬指标，不分语种打折）</div>
+            <!-- 门槛卡片不得写死"已达标"的结论（B15）：数字要么来自读模型，
+                 要么显示"待评测"。Demo 阶段门槛 2（名单召回）与门槛 10（灰度对照）
+                 本来就未达标，写死"已达标"是比造假更坏。 -->
+            <div class="card" style="box-shadow:none;padding:16px;border-color:#E2E8F0">
+              <div class="stat-line"><span class="v" id="gate-cite">待评测</span><span class="l">引用正确率</span></div>
+              <div class="threshold">门槛：引用正确率必须百分之百（三语全部达标，不分语种打折）</div>
             </div>
-            <div class="card" style="box-shadow:none;padding:16px;border-color:#A7F3D0">
-              <div class="stat-line"><span class="v">99.2%</span><span class="l">名单召回率</span></div>
-              <div class="threshold">门槛 ≥99%；命中自动放行 = 0</div>
+            <div class="card" style="box-shadow:none;padding:16px;border-color:#E2E8F0">
+              <div class="stat-line"><span class="v" id="gate-recall">待评测</span><span class="l">名单召回率</span></div>
+              <div class="threshold">门槛：召回率不低于 99，且命中自动放行必须为零（需真实名单源，本 Demo 用结构化模拟源）</div>
             </div>
-            <div class="card" style="box-shadow:none;padding:16px;border-color:#A7F3D0">
-              <div class="stat-line"><span class="v">¥0.046</span><span class="l">单位询盘成本</span></div>
-              <div class="threshold">门槛 ≤ ¥0.20 / 条（缓存 + 分级模型后）</div>
+            <div class="card" style="box-shadow:none;padding:16px;border-color:#E2E8F0">
+              <div class="stat-line"><span class="v" id="gate-cost">待评测</span><span class="l">单位询盘成本</span></div>
+              <div class="threshold">门槛：每条询盘不超过 0.20 元（PRD 12.4；口径为元除以询盘条数，不是除以调用次数）</div>
             </div>
           </div>
         </div>
@@ -90,7 +95,7 @@
           <div class="panel-body">
             <div class="table-wrap"><table id="cost-lang"></table></div>
             <div style="margin-top:16px" id="cost-trend"></div>
-            <p style="font-size:11px;color:var(--color-muted-foreground);margin-top:8px">成本 = Σ(tokens_in×单价_in + tokens_out×单价_out) ÷ 询盘条数；嵌入与重排在本地 CPU 运行，不计入 API 费用。</p>
+            <p style="font-size:11px;color:var(--color-muted-foreground);margin-top:8px">单位成本 = Σ(tokens_in×单价_in + tokens_out×单价_out) ÷ <b>询盘条数</b>（不是 ÷ 调用次数）；调用次数单列。嵌入与重排走远端 API，其费用计入同一口径。</p>
           </div>
         </section>
       </div>
@@ -101,8 +106,9 @@
           <div class="panel-body table-wrap">
             <table id="quality-table"></table>
             <p style="font-size:11px;color:var(--color-muted-foreground);margin-top:12px">
-              公开检索基准（MIRACL / MLDR / Mr. TyDi / mMARCO / MKQA / MLQARetrieval）只作"检索管线体检"，成绩单独成表，<b>不并入本表总分</b>。
+              公开检索基准（MIRACL / MLDR / Mr. TyDi / mMARCO / MKQA）只作"检索管线体检"，成绩单独成表，<b>不并入本表总分</b>。
             </p>
+            <div id="wb-notes" style="margin-top:10px"></div>
           </div>
         </section>
 

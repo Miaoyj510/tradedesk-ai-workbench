@@ -98,7 +98,12 @@
 
   async function reloadLive() {
     const live = await window.TDApi.loadWorkbench();
-    D = Object.assign({}, D, live);
+    // api 模式**不要**把 mock 数据合并进来（R21-03 / B5）。
+    // 原来 `Object.assign({}, D, live)` 会把 mock 独有的字段（pipeline / gates /
+    // riskEvents / kbAssets / terms …）原样留在 D 里 —— 后端没给的字段，界面却显示着
+    // mock 的内容。那是"界面说谎"，比缺一块更糟。
+    // mock 模式才合并（那时 live 可能是空壳）。
+    D = currentSource === 'api' ? live : Object.assign({}, D, live);
     window.TD = D;
     D.toast = toast;
     syncKpis();
@@ -116,8 +121,9 @@
       return 'mock';
     }
     try {
-      await reloadLive();
+      // 先把来源标成 api，再取数 —— reloadLive 靠它决定"合不合并 mock"
       currentSource = 'api';
+      await reloadLive();
       setSourceBadge('真实数据（api）', 'success');
       return 'api';
     } catch (err) {
@@ -132,7 +138,7 @@
   const state = {
     // 不在模块加载时取第一个线程：真数据模式下这时后端还没拿到数据。
     selected: null,
-    filters: { stage: 'all', lang: 'all', risk: 'all' },
+    filters: { stage: 'all', lang: 'all', risk: 'all', wait: 'all' },
     q: '',
     pending: 0,
     cost: 0
@@ -141,6 +147,28 @@
   function syncKpis() {
     state.pending = (D.kpis && D.kpis.pending) || 0;
     state.cost = (D.kpis && D.kpis.costToday) || 0;
+    // 口径说明渲染到数据来源标识旁（B6）：读模型给的 notes 必须在界面上看得见。
+    // 用 querySelector 而不是 getElementById：审核脚本的 DOM 桩只实现了 querySelector。
+    const src = document.querySelector('#data-source');
+    if (src && D.notes && D.notes.length) {
+      src.textContent = (src.textContent || '').replace(/\s*·\s*口径说明[\s\S]*$/, '') +
+        ' · 口径说明：' + D.notes.join('；');
+    }
+  }
+
+  // 名单命中条目 ID：只从证据链取（R21-02）。
+  // 写死演示条目会让风控界面对外失真 —— 合规岗看到"命中 CN-2211"，
+  // 实际命中的可能是 CN-2307，两个不同主体、不同的一致性程序。
+  // 取当前界面上的草稿正文（业务员可能已在界面上改过）。
+  function currentDraftBody(t) {
+    const node = document.querySelector('.draft-body');
+    const fromDom = node && node.textContent ? node.textContent.trim() : '';
+    return fromDom || (t.draft && t.draft.body) || '';
+  }
+
+  function blockedEntryId(t) {
+    const ev = (t.evidence || []).find(e => /^CN-\d+$/.test(e.v || ''));
+    return ev ? ev.v : '';
   }
 
   function matchThread(t) {
@@ -148,6 +176,13 @@
     if (f.stage !== 'all' && t.stage !== f.stage) return false;
     if (f.lang !== 'all' && t.lang !== f.lang) return false;
     if (f.risk !== 'all' && t.risk !== f.risk) return false;
+    // 第 4 类筛选：等待人审时长（PRD FR-ORC-10）。后端已给 t.wait（分钟）。
+    if (f.wait !== 'all') {
+      const w = Number(t.wait) || 0;
+      if (f.wait === 'lt30' && w >= 30) return false;
+      if (f.wait === '30to240' && (w < 30 || w > 240)) return false;
+      if (f.wait === 'gt240' && w <= 240) return false;
+    }
     if (state.q) {
       const q = state.q.toLowerCase();
       if (!(t.company.toLowerCase().includes(q) || t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q) || t.country.includes(q))) return false;
@@ -191,7 +226,11 @@
   function msgHTML(m) {
     const isAr = m.lang === 'ar';
     const tr = isAr ? '买家原文（阿拉伯语 · RTL）' : (m.lang === 'es' ? '买家原文（西班牙语）' : (m.lang === 'en' ? '买家原文（英语）' : '买家原文'));
-    const zh = {
+    // 固定译文只用于 mock 演示（R21-04）：真数据模式下 m.lang 仍是 en/es/ar，
+    // 于是每条真消息下面都挂着一段**与本次消息无关**的固定译文 ——
+    // 业务员会据此理解买家意图，错了会一路带到报价。
+    // 真数据模式的译文由后端给（后端没给就不显示这一行）。
+    const zh = currentSource === 'api' ? null : {
       es: '我们是一家巴西经销商。能否为 X-200 提供 5000 台 FOB 深圳的报价？另外想确认该型号是否有 CE 认证以及交货期。附件为技术图纸。',
       en: '你好，能告诉我 M-77 夹具的材质和安全工作载荷吗？我们用于吊装场景。另外是否有 CE/ISO 认证？',
       ar: '你好，我们是从阿联酋进口的。我们需要 M-77 型号的样品和符合性证书。3000 件的价格是多少？'
@@ -245,7 +284,7 @@
     if (t.state === 'blocked') {
       html += '<div class="draft"><div class="draft-hd">' + icon('shield', 'icon-sm') + '<h3>Sentinel 已阻断，未生成任何回复</h3></div>' +
         '<div class="blocked"><h3>' + icon('warning') + '名单命中 · 系统保持沉默</h3>' +
-        '<p>该买家的最终用户命中出口管制受控条目 <b>CN-2211</b>。按照 GATE-03，Inquiry 的输出已被抑制：不生成报价、交期，也不发出任何问候。' +
+        '<p>该买家的最终用户命中出口管制受控条目 <b>' + esc(blockedEntryId(t) || '（条目 ID 未在证据链中给出）') + '</b>。按照 GATE-03，Inquiry 的输出已被抑制：不生成报价、交期，也不发出任何问候。' +
         '只有人工在证据链上做出书面判定后，线程才会继续。UI 默认不放行。</p></div></div>';
     } else if (t.draft) {
       const d = t.draft;
@@ -255,7 +294,9 @@
         '<span class="badge badge-info">置信度 ' + d.confidence.toFixed(2) + '</span>' +
         '<span class="badge badge-neutral">' + d.intent.map(i => esc(i)).join(' / ') + '</span>' +
         '</div>' +
-        '<div class="draft-body">' + d.body + '</div>' +
+        // 正文转义（R21-01）。要保留换行就用 CSS white-space:pre-wrap，
+        // 不要用 <br> 拼接未转义内容。
+        '<div class="draft-body">' + esc(d.body) + '</div>' +
         (t.citations && t.citations.length ?
           '<div class="citation">' + t.citations.map(c =>
             '<span class="cite' + (c.expiring ? ' expired' : '') + '" title="' + esc(c.note) + '">' + icon(c.type === '证书' ? 'file' : c.type === '产品条目' ? 'coins' : c.type === '术语表' ? 'book' : 'shield', 'icon-sm') + esc(c.id) +
@@ -335,7 +376,9 @@
 
     html += '<div class="section-title" style="margin-top:24px">审计时间线</div><ul class="timeline">';
     t.timeline.forEach(x => {
-      html += '<li class="' + (x.accent ? 'is-accent' : '') + '"><div class="tl-time">' + esc(x.time) + '</div><div class="tl-text">' + x.text + '</div></li>';
+      // x.text 必须转义（R21-01）：转交原因可经 HTTP 接口任意写进事件流，
+      // 不转义就是**存储型** XSS —— 写一次，所有打开该线程的人执行一次。
+      html += '<li class="' + (x.accent ? 'is-accent' : '') + '"><div class="tl-time">' + esc(x.time) + '</div><div class="tl-text">' + esc(x.text) + '</div></li>';
     });
     html += '</ul></div>';
     host.innerHTML = html;
@@ -370,11 +413,22 @@
     if (!draftId) { toast('该线程没有草稿，无法签核', 'warn'); return; }
     try {
       if (act === 'approve') {
-        await window.TDApi.signoff(t.id, draftId, 'approve');
+        // 必须带上当前界面上的草稿正文（B14）：
+        // 业务员在界面上改过（追问 chip 会改 .draft-body），不带上就会被静默丢弃，
+        // 而 toast 还说"已签核并发送"——用户以为发的是改过的。
+        await window.TDApi.signoff(t.id, draftId, 'approve', { body: currentDraftBody(t) });
         // 签核通过后发送是**两个写操作**，需要两张一次性闸门令牌。
         await window.TDApi.send(t.id, draftId);
         await reloadLive();
         toast('已签核并发送', '');
+      } else if (act === 'transfer') {
+        // FR-HUM-06 的四种动作之一：转交他人。
+        // 转交后 Agent 停止主动发送，线程进入人工接管。
+        const reason = window.prompt('转交原因（会进审计时间线，会回灌给接手同事）', '交由同事跟进');
+        if (!reason) { toast('已取消转交', 'warn'); return; }
+        await window.TDApi.signoff(t.id, draftId, 'transfer', { reason: reason });
+        await reloadLive();
+        toast('已转交同事，Agent 停止主动发送', '');
       } else if (act === 'modify') {
         await window.TDApi.signoff(t.id, draftId, 'modify', { body: t.draft && t.draft.body });
         await reloadLive();
@@ -458,6 +512,21 @@
   function initDashboard() {
     const s = $('#stage-chart');
     if (!s) return;
+    // 顶栏 KPI 一律读模型（B11）：原来四个 KPI 是写死的 mock 数字，
+    // 真数据模式下没人更新它们 —— 页面会一直显示"今日已发送 41 / 草稿可用率 78%"。
+    const K = D.kpis || {};
+    const setKpi = (id, val) => { const n = document.querySelector('#' + id); if (n) n.textContent = val; };
+    setKpi('kpi-sent', String(K.sent !== undefined && K.sent !== null ? K.sent : '—'));
+    setKpi('kpi-draft-ready', String(K.draftReady !== undefined && K.draftReady !== null ? K.draftReady : '—'));
+    setKpi('kpi-first-response', K.avgFirstResponse || '—');
+    const unitCost = (K.costThreadCount > 0) ? (K.costToday / K.costThreadCount) : null;
+    setKpi('kpi-unit-cost', unitCost === null ? '—'
+      : '¥' + unitCost.toFixed(3) + ' / 条（硬指标 ≤ ¥0.20）');
+    // 上线门槛卡片：后端没给的指标一律显示"待评测"，不写死"已达标"的结论（B15）。
+    const gateSet = (id, val) => { const n = document.querySelector('#' + id); if (n) n.textContent = val; };
+    gateSet('gate-cite', '待评测');
+    gateSet('gate-recall', '待评测');
+    gateSet('gate-cost', unitCost === null ? '待评测' : ('¥' + unitCost.toFixed(3) + ' / 条'));
     const maxStage = Math.max.apply(null, D.stages.map(x => x.n));
     s.innerHTML = D.stages.map(x =>
       '<tr><td>' + x.name + '</td>' +
@@ -465,11 +534,14 @@
       '<td class="num">' + x.n + '</td><td class="num">' + (x.n / D.stages.reduce((a, b) => a + b.n, 0) * 100).toFixed(0) + '%</td></tr>'
     ).join('');
 
-    $('#cost-lang').innerHTML = D.costByLang.map(c =>
-      '<tr><td>' + c.lang.toUpperCase() + '</td><td class="num">' + c.n + '</td><td class="num">¥' + c.y.toFixed(3) + '</td>' +
-      '<td class="num">¥' + (c.n * c.y).toFixed(2) + '</td></tr>').join('') +
-      '<tr><td><b>合计</b></td><td class="num"><b>' + D.costByLang.reduce((a, b) => a + b.n, 0) + '</b></td>' +
-      '<td class="num"><b>—</b></td><td class="num"><b>¥' + D.costByLang.reduce((a, b) => a + b.n * b.y, 0).toFixed(2) + '</b></td></tr>';
+    $('#cost-lang').innerHTML = '<tr><th>语种</th><th class="num">询盘条数</th><th class="num">单位成本（元/条询盘）</th>' +
+      '<th class="num">调用次数</th><th class="num">小计</th></tr>' +
+      (D.costByLang || []).map(c =>
+      '<tr><td>' + esc(c.lang.toUpperCase()) + '</td><td class="num">' + c.n + '</td><td class="num">¥' + c.y.toFixed(3) + '</td>' +
+      '<td class="num">' + (c.calls || 0) + '</td><td class="num">¥' + (c.n * c.y).toFixed(2) + '</td></tr>').join('') +
+      '<tr><td><b>合计</b></td><td class="num"><b>' + (D.costByLang || []).reduce((a, b) => a + b.n, 0) + '</b></td>' +
+      '<td class="num"><b>—</b></td><td class="num"><b>' + (D.costByLang || []).reduce((a, b) => a + (b.calls || 0), 0) + '</b></td>' +
+      '<td class="num"><b>¥' + (D.costByLang || []).reduce((a, b) => a + b.n * b.y, 0).toFixed(2) + '</b></td></tr>';
 
     // 成本趋势折线（纯 SVG，无第三方库）
     const w = 560, h = 150, pad = 26;
@@ -486,11 +558,29 @@
         '<text x="' + x(i) + '" y="' + (y(d.v) - 8) + '" font-size="10" fill="#334155" text-anchor="middle">¥' + d.v.toFixed(3) + '</text>').join('') +
       '<text x="4" y="' + (h - pad + 4) + '" font-size="10" fill="#64748B">单位：元 / 条询盘</text></svg>';
 
-    $('#quality-table').innerHTML = '<tr><th>语种</th><th class="num">检索 Top-5</th><th class="num">跨语 Top-1</th><th class="num">意图 F1</th>' +
-      '<th class="num">引用正确率</th><th class="num">规格准确率</th><th class="num">注入拦截</th><th class="num">名单召回</th></tr>' +
-      D.quality.map(q => '<tr><td>' + q.label + (q.lang === 'ar' ? ' <span class="badge badge-warning">缩减版</span>' : '') + '</td>' +
-        '<td class="num">' + q.top5.toFixed(2) + '</td><td class="num">' + q.cross.toFixed(2) + '</td><td class="num">' + q.f1.toFixed(2) + '</td>' +
-        '<td class="num">' + q.cite + '</td><td class="num">' + q.spec + '</td><td class="num">' + q.inject + '</td><td class="num">' + q.recall + '</td></tr>').join('');
+    const qualityRows = (D.quality && D.quality.length)
+      ? D.quality.map(q => '<tr><td>' + esc(q.label) + (q.lang === 'ar' ? ' <span class="badge badge-warning">缩减版</span>' : '') + '</td>' +
+          '<td class="num">' + q.top5.toFixed(2) + '</td><td class="num">' + q.cross.toFixed(2) + '</td><td class="num">' + q.f1.toFixed(2) + '</td>' +
+          '<td class="num">' + q.cite + '</td><td class="num">' + q.spec + '</td><td class="num">' + q.inject + '</td><td class="num">' + q.recall + '</td></tr>').join('')
+      // 空表要说明原因（B7）：后端不伪造是对的，但"空着"必须解释，
+      // 否则读者以为功能坏了。
+      : '<tr><td colspan="8" style="color:var(--color-muted-foreground);font-size:12px">' +
+        '暂无分语种评测数据。分语种质量来自 <code>dev.ps1 eval</code> 的评测产物，**不是实时数据**；' +
+        '运行评测脚本后回填。公开检索基准（MIRACL / MLDR / Mr. TyDi / mMARCO / MKQA）只作检索管线体检，不并入本表。</td></tr>';
+    const qt = $('#quality-table');
+    if (qt) {
+      qt.innerHTML = '<tr><th>语种</th><th class="num">检索 Top-5</th><th class="num">跨语 Top-1</th><th class="num">意图 F1</th>' +
+        '<th class="num">引用正确率</th><th class="num">规格准确率</th><th class="num">注入拦截</th><th class="num">名单召回</th></tr>' +
+        qualityRows;
+    }
+    // 读模型的口径说明必须落到界面上（B6）：否则"诚实披露"只停在 JSON 里。
+    const notesHost = $('#wb-notes');
+    if (notesHost) {
+      notesHost.innerHTML = (D.notes && D.notes.length)
+        ? '<div class="note-block"><b>口径说明</b><ul>' +
+          D.notes.map(n => '<li>' + esc(n) + '</li>').join('') + '</ul></div>'
+        : '';
+    }
 
     $('#risk-events').innerHTML = D.riskEvents.map(e =>
       '<tr><td style="font-family:var(--font-mono)">' + e.time + '</td>' +
@@ -508,8 +598,23 @@
     const host = $('#kb-results');
     if (!host) return;
 
-    $('#pipeline-steps').innerHTML = D.pipeline.map((s, i) =>
-      '<div class="step"><div class="n">' + (i + 1) + '</div><div class="t">' + s.t + '</div><div class="d">' + s.d + '</div></div>').join('');
+    // 知识库版本号一律来自读模型（B10 / B12）：
+    // 原来在代码里写死了一个版本号，而实际在用的是另一个 ——
+    // 界面挂着一个已经不存在的库版本，业务员会据此判断引用来自哪个版本。
+    // （注释里也不写具体版本号：写死的版本号会被静态检查当成"还在用"。）
+    const kbVer = document.querySelector('#kb-version');
+    if (kbVer) kbVer.textContent = D.kb_version || '未提供';
+
+    // 管线步骤只在后端给了 pipeline 时才渲染（R21-03 / B5）：
+    // 后端没提供的字段，界面不许拿 mock 顶上 —— 那是"界面说谎"。
+    const pipeHost = $('#pipeline-steps');
+    if (pipeHost) {
+      pipeHost.innerHTML = (D.pipeline && D.pipeline.length)
+        ? D.pipeline.map((s, i) =>
+            '<div class="step"><div class="n">' + (i + 1) + '</div><div class="t">' + esc(s.t) + '</div><div class="d">' + esc(s.d) + '</div></div>').join('')
+        : '<div class="empty-note"><div class="t">后端未提供管线定义</div>' +
+          '<div class="d">本页不展示演示态的固定管线；真实编排轨迹请看线程详情的事件流与审计时间线。</div></div>';
+    }
 
     $('#term-table').innerHTML = '<div class="term-row head"><div>中文</div><div>English</div><div>Español</div><div>العربية / 禁用译法</div></div>' +
       D.terms.map(t => '<div class="term-row"><div>' + t.zh + '</div><div>' + t.en + '</div><div>' + t.es + '</div>' +
@@ -529,7 +634,7 @@
           '<span class="ev-score">score ' + a.score.toFixed(3) + '</span></div>' +
           '<div class="ev-body">' + a.body + '</div>' +
           '<div class="ev-foot">' + a.tags.map(t => '<code>' + t + '</code>').join('') +
-          '<span>有效期：' + a.valid + '</span><span>库版本：kb-2026.11-b</span></div></div>';
+          '<span>有效期：' + esc(a.valid) + '</span><span>库版本：' + esc(D.kb_version || '未提供') + '</span></div></div>';
       }).join('');
       host.innerHTML = rows;
       $('#kb-date-label').textContent = '检索基准日：' + dateStr + '（法规与证书按「买家所在国 + 当前日期」过滤）';
