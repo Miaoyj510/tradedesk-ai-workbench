@@ -4,6 +4,7 @@
 #   & ".\scripts\push.ps1"                                  # 推送当前分支
 #   & ".\scripts\push.ps1" -Branches main,agent-a,agent-b   # 推送多个分支
 #   & ".\scripts\push.ps1" -ApiOnly                         # 强制走 GitHub API
+#   & ".\scripts\push.ps1" -Branches main,agent-b -ForceBranches agent-b  # 审核线改写历史后安全强推
 #
 # 本机踩过的三个坑（都已在脚本里处理）
 #   1. git(libcurl) 不读 Windows 系统代理 → 直连 github.com 被重置
@@ -20,6 +21,7 @@ param(
   [string]$Owner = "",
   [string]$Repo = "",
   [switch]$ApiOnly,
+  [string[]]$ForceBranches = @(),
   [int]$Retries = 2
 )
 
@@ -75,6 +77,9 @@ $cmdExe = "$env:SystemRoot\System32\cmd.exe"
 # 通过 powershell.exe -File 传参时，"main,agent-a" 是一个整串，这里拆开
 if ($Branches.Count -eq 1 -and $Branches[0] -match ",") {
   $Branches = @($Branches[0] -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
+}
+if ($ForceBranches.Count -eq 1 -and $ForceBranches[0] -match ",") {
+  $ForceBranches = @($ForceBranches[0] -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 }
 
 if (-not $Branches) {
@@ -149,8 +154,10 @@ try {
     $pushed = $false
     if (-not $ApiOnly -and $proxyOk) {
       for ($i = 1; $i -le $Retries; $i++) {
-        Write-Host "  [$b] git push 第 $i/$Retries 次 ..." -ForegroundColor DarkGray
-        $code = Invoke-GitCapture @("-c", "http.sslVersion=tlsv1.2", "-c", "credential.helper=", "push", "-u", "origin", $b)
+        $forceArgs = @(); $forceNote = ""
+        if ($ForceBranches -contains $b) { $forceArgs = @("--force-with-lease"); $forceNote = "（force-with-lease）" }
+        Write-Host "  [$b] git push 第 $i/$Retries 次 ...$forceNote" -ForegroundColor DarkGray
+        $code = Invoke-GitCapture (@("-c", "http.sslVersion=tlsv1.2", "-c", "credential.helper=", "push", "-u", "origin") + $forceArgs + @($b))
         $log = @()
         if (Test-Path -LiteralPath $logFile) { $log = @(Get-Content -LiteralPath $logFile -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -ne "" }) }
         if ($code -eq 0) {

@@ -17,12 +17,13 @@
 src/tradedesk/
   domain/     状态机、领域模型、枚举（纯函数，无 IO）
   runtime/    supervisor（路由/仲裁/SLA）、gates（11 条闸门 + 闸门令牌）、handoff（15 字段契约）
-  agents/     inquiry（询盘应答）、sentinel（风控）、registry（角色注册表）
-  retrieval/  S3 检索层：base（协议）、lexical（多语种分词）、pipeline（7 步管线）、embedders（BGE-M3 占位）
-  api/        FastAPI 层：只做参数搬运 + 闸门令牌鉴权，业务规则一律不在这里
+  agents/     inquiry（询盘应答）、draft_writer（模型出稿）、prompts、sentinel（风控）、registry（角色注册表）
+  llm/        多云厂商层：providers（5 家注册表）、factory、chat、pricing（成本计量）
+  retrieval/  检索层：词法 + 结构化 + 稠密三通道 RRF、embedders（远端/占位）、indexer、store_retriever
+  api/        FastAPI 层：app、auth（登录/会话/角色可见域）、workbench（读模型 BFF）、deps（闸门令牌守卫）
   store/      base（接口）、sqlite_store、postgres_store —— 换后端业务代码零改动
-scripts/      verify_s1.py / verify_s2.py / verify_s3.py（自证）、audit_s2.py（审核方断言）
-docs/         S2-ACCEPTANCE.md、S2-AUDIT-R9.md、S3-ACCEPTANCE.md、NEXT.md（状态卡）
+scripts/      verify_s1…s6（自证）、audit_s2…s6（审核方断言）、eval_retrieval / eval_llm（评测）、push.ps1（推送）
+docs/         S2…S6-ACCEPTANCE.md、审核报告 R9…R21、S4-EVAL-BASELINE.md、NEXT.md（状态卡）
 ```
 
 ## 三个角色 / 分支（WORKFLOW.md 第 1 节）
@@ -39,18 +40,15 @@ docs/         S2-ACCEPTANCE.md、S2-AUDIT-R9.md、S3-ACCEPTANCE.md、NEXT.md（�
 
 **PRD 冲突以 PRD 为准**；实在判断不了就停下来问，不要擅自选一边。
 
-## 当前状态（2026-11-21）
+## 当前状态（2026-11-24）
 
-S1 收口 → S2 已交卷 → R9 审核（14 个根因）→ R10 全修完
-→ S3 检索层交卷（`3e86884`）→ 审核 R11（8 个根因）→ R12（3 个根因）→ R14（3 个根因）
-→ **R16 把 R14 + R15 的 10 个根因全修完**（详见 `docs/S4-FIX-R16.md`）。
+S1 → S2（R9→R10）→ S3（R11/R12/R14→R13/R16）→ S4-4a/4b/4c（R15→R16、R17→R18 `e002015`）
+→ S5 厂商层 + 真模型出稿 + 成本落库 + 分语种评测（R19→R20 `623ca24`）
+→ S6-1a/1b 前端接真数据 + S6-2 镜像 + S6-4 登录（R21→`92bb7d1`）均已交卷。
 
-→ **S4-4a 向量层 → S4-4b 稠密通道接入 RRF → S4-4c 评测框架与基线** 均已交卷
-（见 `docs/S4-ACCEPTANCE.md` 第七节与 `docs/S4-EVAL-BASELINE.md`）。
-
-`dev.ps1 check` **九步**：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
-→ S2 独立审核 106/106 → pytest 126 passed → S3 独立审核 90/90 → S4 向量层 62/62
-→ **S4 独立审核**。
+`dev.ps1 check` **十一步**：语法 → S1 双后端 53/53 → S2 自证 97/97 → S3 自证 52/52
+→ S2 独立审核 106/106 → pytest 234 passed → S3 独立审核 90/90 → S4 向量层 60/60（PG 62/62）
+→ S4 独立审核（SQLite 78 / PG 85）→ S5 独立审核 54 项 → **S6 独立审核（49 + 渲染层 15 项）**。
 
 **审核线（`agent-b`）现状**：**R21 审核完成**（S6-1a 工作台读模型 + S6-1b 前端接真数据，
 断言 64 项，**12 个根因已由实现线修完（`agent-a @ 92bb7d1`）**）；`dev.ps1 audit6` 全绿（已入 `check` 第十一步）。
@@ -62,14 +60,14 @@ S5 独立审核已入 `check` 门禁。
 
 ```powershell
 $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
-& $dev check              # 交付前自检（九步）：语法 + S1 双后端 + S2/S3 自证 + S2/S3 独立审核 + S4 + pytest
+& $dev check              # 交付前自检（十一步）：语法 + S1 双后端 + S2/S3 自证 + pytest + S2…S6 独立审核
 & $dev verify             # 只跑 S1 验证
 & $dev test               # 只跑 pytest
 & $dev audit              # S2 独立审核（审核方断言）
-& $dev audit3             # S3 独立审核（已进 check，这里可单独跑；R14 缺陷修完前为红）
-& $dev audit4             # S4 独立审核（审核方断言；R15 缺陷修完前为红）
-& $dev audit5             # S5 独立审核（审核方断言；R19 缺陷修完前为红）
-& $dev audit6             # S6 独立审核（审核方断言；R21 缺陷修完前为红；渲染层需 node）
+& $dev audit3             # S3 独立审核（已进 check，可单独跑；R14 缺陷已修，绿）
+& $dev audit4             # S4 独立审核（R15/R17 缺陷已修，绿）
+& $dev audit5             # S5 独立审核（R19 缺陷已由 R20 修完，绿）
+& $dev audit6             # S6 独立审核（R21 缺陷已修，绿；渲染层需 node；--dsn 派生暂存库 tradedesk_audit_s6）
 & $dev index              # 建立知识库向量索引（显式动作，会调云端 API、计费）
 & $dev serve              # 起 HTTP 接口（http://127.0.0.1:8080/docs）
 & $dev clean              # 清验证临时文件与缓存
@@ -119,21 +117,21 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 - **`list_kb_chunks` 必须有 `ORDER BY chunk_id`**：PostgreSQL 更新一行后那行会被挤到堆尾，不排序就不能靠顺序猜块。
 - **产品必须被结构化通道确认才进草稿**：只靠词法命中的产品不许报型号与价格，
   否则"给我个最好价"会被随便挑一个产品并报价。
-- **PG 近邻检索不带 `kb_version`**（R17-01）：旧版本向量会把稠密通道挤空 ——
+- **PG 近邻检索必须带 `kb_version`**（R17-01，R18 已修）：否则旧版本向量会把稠密通道挤空 ——
   同一查询在 PG 上返回 0 条、SQLite 上返回 10 条。查索引用
   `docker exec tradedesk-db psql -U tradedesk -d <库> -c "SELECT indexname FROM pg_indexes WHERE tablename='kb_embeddings'"`。
-- **HNSW 索引只在建表时创建**（R17-02）：存量库（4a 建的表）永远没有 ANN 索引，
-  近邻检索退化成全表扫描 —— 本机三个库实测都只有 `kb_embeddings_pkey`。
+- **HNSW 索引在存量库也要建**（R17-02，R18 已修）：此前只在「表不存在」分支建索引，
+  从 4a 升上来的库永远没有 ANN 索引，近邻检索退化成全表扫描。
 - **`dev.ps1 eval` 每次跑 = 160 次云端查询嵌入调用**：评测脚本不看
   `TRADEDESK_EMBEDDER_ENABLED`（那只管应用启动），跑之前先想清楚要不要花这个钱。
-- **评测的 Macro-F1 分母里有一个无样本的 `unknown`**（R17-05）：报出来的数比
-  PRD 12.3 口径低 1/6，比对门槛前先看清口径。
+- **评测 Macro-F1 用 PRD 12.3 的五类意图口径**（R17-05，R18 已修）：此前把无样本的
+  `unknown` 算进分母，报出来的数系统性低 1/6；比对门槛前先看清口径。
 
 - **厂商表在 `src/tradedesk/llm/providers.py`**：换厂商 = 改表里一行 + 改一个 env，业务代码不动。
   基址地址**按厂商分开**（每家各有 `base_url_env`），不会拿 MiniMax 的地址去请求阿里云。
-  ⚠️ **但 key 还没隔离（R19-01，审核实测）**：`config.llm_api_key` 会兜底到旧的 `MINIMAX_API_KEY`，
-  `resolve_api_key` 又拿它当 fallback → 切到阿里云/智谱时**MiniMax 的密钥会被发过去**。
-  换厂商前先清掉别的厂商的 key；修完 R19-01 这条警告才能撤。
+  ✅ **key 已按厂商隔离（R19-01，R20 已修）**：`resolve_api_key` 只认属于对话厂商的 fallback，
+  嵌入厂商只有在自己就是对话厂商时才能用它；不会再把 MiniMax 的密钥发往阿里云/智谱。
+  仍建议 `.env` 里只留当前厂商的 key，避免混淆。
 - **`MiniMax-Text-01` 已下线**（实测 HTTP 404 "no longer available"），`MiniMax-M2` 也一样返回 404 ——
   **`/v1/models` 列表不等于可用**。当前可用：`MiniMax-M3` / `MiniMax-M3.1-Flash`（默认已改 M3）。
 - **MiniMax-M3 把思考过程写在 `message.content` 里**（`<think>...</think>`）——
