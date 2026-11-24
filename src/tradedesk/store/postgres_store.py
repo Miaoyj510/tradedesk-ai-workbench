@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     hash      TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kb_chunks (
-    chunk_id        TEXT PRIMARY KEY,
+    chunk_id        TEXT NOT NULL,
     doc_id         TEXT NOT NULL,
     doc_type       TEXT NOT NULL,
     title          TEXT NOT NULL DEFAULT '',
@@ -100,7 +100,8 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
     effective_to   TIMESTAMPTZ,
     valid_until    TIMESTAMPTZ,
     kb_version     TEXT NOT NULL DEFAULT '',
-    extra          JSONB NOT NULL DEFAULT '{}'::jsonb
+    extra          JSONB NOT NULL DEFAULT '{}'::jsonb,
+    PRIMARY KEY (chunk_id, kb_version)
 );
 CREATE INDEX IF NOT EXISTS idx_kb_version ON kb_chunks(kb_version);
 CREATE INDEX IF NOT EXISTS idx_kb_doc_type ON kb_chunks(doc_type);
@@ -221,6 +222,9 @@ class PostgresStateStore:
                 "ON CONFLICT (key) DO NOTHING"
             )
             self._init_embedding_table(cur)
+            # 复合主键迁移：单列 chunk_id 主键下，两个库版本的同名块会互相顶掉 ——
+            # 双索引（PRD 13.4.8）立不住（建新版本等于毁掉旧版本）。
+            self._migrate_kb_composite_pk(cur)
 
     def close(self) -> None:
         """关闭所有线程的连接（不只是当前线程那条）。"""
@@ -543,12 +547,12 @@ class PostgresStateStore:
                 "INSERT INTO kb_chunks(chunk_id, doc_id, doc_type, title, text, lang, identifiers, "
                 "countries, hs_codes, tags, effective_from, effective_to, valid_until, kb_version, extra) "
                 "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
-                "ON CONFLICT (chunk_id) DO UPDATE SET doc_id=EXCLUDED.doc_id, "
+                "ON CONFLICT (chunk_id, kb_version) DO UPDATE SET doc_id=EXCLUDED.doc_id, "
                 "doc_type=EXCLUDED.doc_type, title=EXCLUDED.title, text=EXCLUDED.text, "
                 "lang=EXCLUDED.lang, identifiers=EXCLUDED.identifiers, countries=EXCLUDED.countries, "
                 "hs_codes=EXCLUDED.hs_codes, tags=EXCLUDED.tags, "
                 "effective_from=EXCLUDED.effective_from, effective_to=EXCLUDED.effective_to, "
-                "valid_until=EXCLUDED.valid_until, kb_version=EXCLUDED.kb_version, extra=EXCLUDED.extra",
+                "valid_until=EXCLUDED.valid_until, extra=EXCLUDED.extra",
                 (
                     chunk.chunk_id, chunk.doc_id, chunk.doc_type, chunk.title, chunk.text, chunk.lang,
                     json.dumps(chunk.identifiers, ensure_ascii=False),
@@ -580,16 +584,41 @@ class PostgresStateStore:
             for r in rows
         ]
 
-    def get_kb_chunk(self, chunk_id):
-        for c in self.list_kb_chunks():
-            if c.chunk_id == chunk_id:
-                return c
-        return None
+    def get_kb_chunk(self, chunk_id, kb_version=None):
+        """按块 ID 取块；给了 kb_version 就精确到那一个版本。
 
-    def clear_kb(self) -> None:
-        # 重灌块不删向量（R15-02）：向量是派生数据，块没变就不该重嵌
+        复合主键之后同一 chunk_id 会在多个库版本下并存，
+        所以**必须能按版本取**（不指定版本时取版本号最小的那一个）。
+        """
+        # psycopg 默认返回 tuple —— 用位置索引（与本文件其它方法一致），不按列名取
+        sql = ("SELECT chunk_id, doc_id, doc_type, title, text, lang, identifiers, "
+               "countries, hs_codes, tags, effective_from, effective_to, valid_until, "
+               "kb_version, extra FROM kb_chunks WHERE chunk_id=%s")
+        params = [chunk_id]
+        if kb_version:
+            sql += " AND kb_version=%s"
+            params.append(kb_version)
+        sql += " ORDER BY kb_version"
         with self.conn.cursor() as cur:
-            cur.execute("DELETE FROM kb_chunks")
+            cur.execute(sql, params)
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return KBChunk(
+            chunk_id=row[0], doc_id=row[1], doc_type=row[2], title=row[3], text=row[4],
+            lang=row[5], identifiers=row[6], countries=row[7], hs_codes=row[8],
+            tags=row[9], effective_from=row[10], effective_to=row[11],
+            valid_until=row[12], kb_version=row[13], extra=row[14],
+        )
+
+    def clear_kb(self, kb_version=None) -> None:
+        # 重灌块不删向量（R15-02）：向量是派生数据，块没变就不该重嵌
+        # 给 kb_version 时**只清该版本**（双索引的前提：灌基线不能抹掉灰度版）
+        with self.conn.cursor() as cur:
+            if kb_version:
+                cur.execute("DELETE FROM kb_chunks WHERE kb_version=%s", (kb_version,))
+            else:
+                cur.execute("DELETE FROM kb_chunks")
 
     # ---------- 向量（S4） ----------
     def _init_embedding_table(self, cur) -> None:
@@ -632,26 +661,52 @@ class PostgresStateStore:
         if self.pgvector_available and self.vector_dim > 0:
             cur.execute(
                 f"CREATE TABLE IF NOT EXISTS kb_embeddings ("
-                f"  chunk_id   TEXT PRIMARY KEY,"
+                f"  chunk_id   TEXT NOT NULL,"
                 f"  kb_version TEXT NOT NULL DEFAULT '',"
                 f"  model      TEXT NOT NULL DEFAULT '',"
                 f"  dim        INTEGER NOT NULL DEFAULT 0,"
                 f"  embedding  vector({self.vector_dim}),"
                 f"  content_fp TEXT NOT NULL DEFAULT '',"
-                f"  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+                f"  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+                f"  PRIMARY KEY (chunk_id, kb_version))")
             self.embedding_column = "vector"
             self._ensure_hnsw_index(cur)
         else:
             cur.execute(
                 "CREATE TABLE IF NOT EXISTS kb_embeddings ("
-                "  chunk_id   TEXT PRIMARY KEY,"
+                "  chunk_id   TEXT NOT NULL,"
                 "  kb_version TEXT NOT NULL DEFAULT '',"
                 "  model      TEXT NOT NULL DEFAULT '',"
                 "  dim        INTEGER NOT NULL DEFAULT 0,"
                 "  embedding  JSONB NOT NULL DEFAULT '[]'::jsonb,"
                 "  content_fp TEXT NOT NULL DEFAULT '',"
-                "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+                "  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),"
+                "  PRIMARY KEY (chunk_id, kb_version))")
             self.embedding_column = "jsonb"
+
+    def _migrate_kb_composite_pk(self, cur) -> None:
+        """kb_chunks / kb_embeddings 主键：单列 chunk_id → (chunk_id, kb_version)。
+
+        单列主键时两个库版本的同名块会互相顶掉 —— "双索引 + 别名切换"
+        （PRD 13.4.8）根本立不住：建新版本等于毁掉旧版本，回滚只能重建
+        （重建窗口 = 服务不可用）。
+
+        改成复合主键后：同名块可以在两个版本下并存，回滚只是切别名，**不重建**。
+        旧库里 (chunk_id, kb_version) 本来就唯一（chunk_id 唯一），加复合主键不冲突。
+        """
+        for table in ("kb_chunks", "kb_embeddings"):
+            cur.execute("SELECT to_regclass(%s)", (table,))
+            if cur.fetchone()[0] is None:
+                continue
+            cur.execute(
+                "SELECT a.attname FROM pg_index i "
+                "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+                "WHERE i.indrelid = %s::regclass AND i.indisprimary", (table,))
+            pk = sorted(r[0] for r in cur.fetchall())
+            if pk == ["chunk_id", "kb_version"]:
+                continue
+            cur.execute("ALTER TABLE %s DROP CONSTRAINT IF EXISTS %s_pkey" % (table, table))
+            cur.execute("ALTER TABLE %s ADD PRIMARY KEY (chunk_id, kb_version)" % table)
 
     def _ensure_hnsw_index(self, cur) -> None:
         """ANN 索引：防量化下推到 pgvector 时，线性扫描会成为 50–100 并发下的瓶颈（N7）。
@@ -673,7 +728,7 @@ class PostgresStateStore:
                 cur.execute(
                     "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, embedding, content_fp, updated_at) "
                     "VALUES(%s,%s,%s,%s, CAST(%s AS vector), %s, now()) "
-                    "ON CONFLICT(chunk_id) DO UPDATE SET kb_version=excluded.kb_version, "
+                    "ON CONFLICT(chunk_id, kb_version) DO UPDATE SET "
                     "model=excluded.model, dim=excluded.dim, embedding=excluded.embedding, "
                     "content_fp=excluded.content_fp, updated_at=now()",
                     (chunk_id, kb_version, model, len(vec),
@@ -684,7 +739,7 @@ class PostgresStateStore:
                 cur.execute(
                     "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, embedding, content_fp, updated_at) "
                     "VALUES(%s,%s,%s,%s,%s,%s, now()) "
-                    "ON CONFLICT(chunk_id) DO UPDATE SET kb_version=excluded.kb_version, "
+                    "ON CONFLICT(chunk_id, kb_version) DO UPDATE SET "
                     "model=excluded.model, dim=excluded.dim, embedding=excluded.embedding, "
                     "content_fp=excluded.content_fp, updated_at=now()",
                     (chunk_id, kb_version, model, len(vec), Json(vec), content_fp or ""),

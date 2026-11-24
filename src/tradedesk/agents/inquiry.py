@@ -173,10 +173,19 @@ class InquiryAgent(BaseAgent):
         if self.retriever_factory is None:
             return self.retriever
         kb_version = str((request.context or {}).get("kb_version") or "")
+        # 索引版本（PRD 13.4.8）：块按库版本取、向量按索引版本取 ——
+        # 两者可以不同（索引回滚不必重建）。
+        index_version = str((request.context or {}).get("index_version") or "") or kb_version
         if not kb_version:
             return self.retriever
         try:
-            return self.retriever_factory(kb_version) or self.retriever
+            return self.retriever_factory(kb_version, index_version) or self.retriever
+        except TypeError:
+            # 兼容只接一个参数的旧工厂
+            try:
+                return self.retriever_factory(kb_version) or self.retriever
+            except Exception:
+                return self.retriever
         except Exception:
             return self.retriever
 

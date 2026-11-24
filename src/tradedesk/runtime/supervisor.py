@@ -343,8 +343,11 @@ class Supervisor:
         inquiry_context: Dict[str, Any] = {"customer": profile}
         if effective is not None:
             kb_version = str(effective.components.get("kb_version") or "")
+            index_version = str(effective.components.get("index_version") or "") or kb_version
             if kb_version:
                 inquiry_context["kb_version"] = kb_version
+            if index_version:
+                inquiry_context["index_version"] = index_version
         result = inquiry.handle(AgentRequest(thread=thread, message=message,
                                              language=language, context=inquiry_context))
         draft = result.draft

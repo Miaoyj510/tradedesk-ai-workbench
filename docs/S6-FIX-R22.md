@@ -1,9 +1,10 @@
-# S6-3 修复记录（R22：发布 / 灰度 / 回滚 独立审核）
+# S6-3 修复记录（R22 + R23：发布 / 灰度 / 回滚 独立审核）
 
 > 审核方：`agent-b`。判据：`docs/S6-3-AUDIT-CRITERIA.md`（**写于实现交付之前**，22 条）。
 > 审核脚本：`scripts/audit_s6_release.py`（55 项断言；SQLite + PostgreSQL 双后端 + 越权路径）。
 > 被审对象：S6-3 首版实现（`agent-a @ cd2c592`）。
-> 修完：`agent-a`（本文件），复跑 `scripts/audit_s6_release.py` → **55 PASS / 0 FAIL**。
+> 审核共三轮（R22 六根因 → R23 加严断言五根因），全部由实现线修完；
+> 复跑 `scripts/audit_s6_release.py`（67 项）→ **66 PASS / 0 FAIL**。
 
 ---
 
@@ -55,13 +56,46 @@
 
 ---
 
+## 二之二、第二轮与第三轮根因（R23 加严断言）
+
+审核方在第一轮之后又加严（判据不变，断言更狠），实测又抓出 **5 个根因**：
+
+| # | 根因 | 审核断言 | 严重度 |
+| --- | --- | --- | --- |
+| R22-07 | **双索引根本不成立**：`kb_chunks` / `kb_embeddings` 主键是单列 `chunk_id`，两个库版本的**同名块互相顶掉** —— 建新版本 = 毁掉旧版本，回滚只能重建 | S6-H「G9 双索引」 | **P0（PRD 13.4.8 的回滚前提不成立）** |
+| R22-08 | **启动重灌抹掉灰度版**：`load_kb` 是 replace 式且清全库，重启一次灰度就没了 | S6-I「灰度库版本跨重启存活」 | **P0** |
+| R22-09 | **`index_version` 只是装饰性字段**：没有任何模块读它，改了等于没改 | S6-H「index_version 必须被消费」 | P1（标志位只有声明没有守卫） |
+| R22-10 | **灰度到一个"库里没块"的版本**：台账与审计一切正常，但买家收到的是"请补充信息"（草稿里没有价格） | S6-I「未就绪库版本」 | **P0（静默退化）** |
+| R22-11 | **证据可填任意字符串**：填一句说明就能放行，禁止项"不允许跳过回归直接改 Prompt"形同虚设 | S6-I「证据不得只是任意非空字符串」 | **P0（禁止项失效）** |
+
+### 修法
+
+- **R22-07 复合主键**（本轮最大改动，涉及存储层 schema）：
+  - `kb_chunks` / `kb_embeddings` 主键从单列 `chunk_id` 改成 **(chunk_id, kb_version)**；
+  - 两个后端都写了**老库迁移**（SQLite 重建表、PostgreSQL 改主键约束），数据全量保留；
+  - `upsert` 的冲突键同步改复合键；`get_kb_chunk(chunk_id, kb_version)` 改成**能按版本取**
+    （同名块在多个版本下并存，不指定版本时取版本号最小的那一个）。
+  - 结果：同名块在两个库版本下**真正并存** → 回滚只是切别名，**不重建**。
+- **R22-08 按版本清库**：`clear_kb(kb_version)` 只清该版本；`load_kb(..., replace=True)`
+  只清**同版本** —— 灌基线不再抹掉正在灰度的版本。
+- **R22-09 index_version 进检索路径**：**块按 `kb_version` 取、向量按 `index_version` 取**
+  （`indexer.load_index` / `StoreRetriever` / `deps` 的检索器工厂 / `inquiry` / `supervisor` 五处消费）。
+  语义：索引可以**独立于块**切换 —— 把 `index_version` 指回旧的一套即可回滚索引，不必重建。
+- **R22-10 未就绪版本**：建发布时若目标库版本库里没块 → **增量补齐**（不动其它版本）；
+  补不齐就直接拒绝这次发布；分流时再兜底一层（版本没就绪就不进灰度）。
+- **R22-11 证据可核验**：回归 / L-6 证据必须带**可追溯编号**（如 `R-001`、`L-6 回归报告`），
+  否则拒绝发布（错误码 `regression_evidence_unverifiable` / `risk_evidence_unverifiable`）。
+
+---
+
 ## 三、验证
 
 | 项 | 结果 |
 | --- | --- |
-| `scripts/audit_s6_release.py`（审核方断言，双后端） | **55 PASS / 0 FAIL** |
-| `scripts/verify_s6_3.py`（实现方自证，双后端） | **85 PASS / 0 FAIL**（新增索引版本、白名单跨档、越权路径共 10 项） |
-| `tests/test_release.py`（单元测试） | **25 passed**（新增 2 项：索引版本归属、白名单跨档） |
+| `scripts/audit_s6_release.py`（审核方断言，双后端） | **66 PASS / 0 FAIL**（共 67 项，1 项记账） |
+| `scripts/verify_s6_3.py`（实现方自证，双后端） | **91 PASS / 0 FAIL**（新增同名块并存、证据可核验、未就绪补齐、index_version 被消费等 12 项） |
+| `tests/test_release.py`（单元测试） | **28 passed**（新增 5 项：证据可核验、同名块两版本并存、未就绪补齐、索引版本归属、白名单跨档） |
+| 全量 pytest | **262 项**（261 passed + 1 skipped） |
 | `dev.ps1 check` | **十三步全绿**（新增第十三步 = S6-3 独立审核） |
 
 ---

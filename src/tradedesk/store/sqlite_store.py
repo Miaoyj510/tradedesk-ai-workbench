@@ -83,16 +83,17 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE TABLE IF NOT EXISTS kb_embeddings (
-    chunk_id   TEXT PRIMARY KEY,
+    chunk_id   TEXT NOT NULL,
     kb_version TEXT NOT NULL DEFAULT '',
     model      TEXT NOT NULL DEFAULT '',
     dim        INTEGER NOT NULL DEFAULT 0,
     vector     TEXT NOT NULL DEFAULT '[]',
     content_fp TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT ''
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (chunk_id, kb_version)
 );;
 CREATE TABLE IF NOT EXISTS kb_chunks (
-    chunk_id        TEXT PRIMARY KEY,
+    chunk_id        TEXT NOT NULL,
     doc_id         TEXT NOT NULL,
     doc_type       TEXT NOT NULL,
     title          TEXT NOT NULL DEFAULT '',
@@ -106,7 +107,8 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
     effective_to   TEXT,
     valid_until    TEXT,
     kb_version     TEXT NOT NULL DEFAULT '',
-    extra          TEXT NOT NULL DEFAULT '{}'
+    extra          TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (chunk_id, kb_version)
 );
 CREATE INDEX IF NOT EXISTS idx_kb_version ON kb_chunks(kb_version);
 CREATE INDEX IF NOT EXISTS idx_kb_doc_type ON kb_chunks(doc_type);
@@ -154,6 +156,47 @@ CREATE TABLE IF NOT EXISTS release_alias (
     release_id  TEXT NOT NULL,
     components  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
+);
+"""
+
+
+# 复合主键建表片段（迁移时重建表用；DDL 里保持同一份定义）
+SQLITE_KB_CHUNKS_DDL = """
+CREATE TABLE IF NOT EXISTS kb_chunks (
+    chunk_id        TEXT NOT NULL,
+    doc_id         TEXT NOT NULL,
+    doc_type       TEXT NOT NULL,
+    title          TEXT NOT NULL DEFAULT '',
+    text           TEXT NOT NULL,
+    lang           TEXT NOT NULL DEFAULT 'zh',
+    identifiers    TEXT NOT NULL DEFAULT '{}',
+    countries      TEXT NOT NULL DEFAULT '[]',
+    hs_codes       TEXT NOT NULL DEFAULT '[]',
+    tags           TEXT NOT NULL DEFAULT '[]',
+    effective_from TEXT,
+    effective_to   TEXT,
+    valid_until    TEXT,
+    kb_version     TEXT NOT NULL DEFAULT '',
+    extra          TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (chunk_id, kb_version)
+);
+"""
+
+SQLITE_KB_CHUNKS_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_kb_version ON kb_chunks(kb_version);
+CREATE INDEX IF NOT EXISTS idx_kb_doc_type ON kb_chunks(doc_type);
+"""
+
+SQLITE_KB_EMBEDDINGS_DDL = """
+CREATE TABLE IF NOT EXISTS kb_embeddings (
+    chunk_id   TEXT NOT NULL,
+    kb_version TEXT NOT NULL DEFAULT '',
+    model      TEXT NOT NULL DEFAULT '',
+    dim        INTEGER NOT NULL DEFAULT 0,
+    vector     TEXT NOT NULL DEFAULT '[]',
+    content_fp TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (chunk_id, kb_version)
 );
 """
 
@@ -228,6 +271,10 @@ class SqliteStateStore:
                     "ALTER TABLE threads ADD COLUMN message_hash TEXT NOT NULL DEFAULT ''")
         except sqlite3.OperationalError:
             pass
+        # 复合主键迁移必须**在** executescript 之前：
+        # 老库的两张表是单列 chunk_id 主键，同名块在两个库版本下会互相顶掉 ——
+        # 双索引（PRD 13.4.8）就立不住。新库没有这两张表，迁移直接跳过。
+        self._migrate_kb_composite_pk()
         self._conn.executescript(DDL)
         # 轻量迁移：老库补列（CREATE TABLE IF NOT EXISTS 不会给已存在的表加列）
         _cols = {r[1] for r in self._conn.execute("PRAGMA table_info(gate_tokens)")}
@@ -245,6 +292,42 @@ class SqliteStateStore:
                 (str(SCHEMA_VERSION),),
             )
         self._conn.commit()
+
+    def _migrate_kb_composite_pk(self) -> None:
+        """把 kb_chunks / kb_embeddings 的主键从单列 chunk_id 改成 (chunk_id, kb_version)。
+
+        为什么必须改：主键是单列时，两个库版本里的**同名块**会互相顶掉 ——
+        "双索引 + 别名切换"（PRD 13.4.8）根本立不住：建新版本等于毁掉旧版本，
+        回滚只能重建（重建窗口 = 服务不可用）。
+
+        改成复合主键后：同名块可以在两个版本下并存，回滚只是切别名，**不重建**。
+        迁移是重建表（数据全量保留）：块与向量都是可再生的派生数据，迁移不丢业务数据。
+        """
+        for table, ddl, indexes in (
+            ("kb_chunks", SQLITE_KB_CHUNKS_DDL, SQLITE_KB_CHUNKS_INDEXES),
+            ("kb_embeddings", SQLITE_KB_EMBEDDINGS_DDL, ""),
+        ):
+            exists = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+            if not exists:
+                continue
+            info = list(self._conn.execute("PRAGMA table_info(%s)" % table))
+            pk_cols = [r[1] for r in sorted(info, key=lambda r: r[5]) if r[5] > 0]
+            if "kb_version" in pk_cols:
+                continue          # 已是复合主键
+            # 旧索引跟着旧表走：先删掉（否则同名索引会让新表建不出索引）
+            for idx in ("idx_kb_version", "idx_kb_doc_type"):
+                try:
+                    self._conn.execute("DROP INDEX IF EXISTS %s" % idx)
+                except sqlite3.OperationalError:
+                    pass
+            self._conn.execute("ALTER TABLE %s RENAME TO %s_old" % (table, table))
+            self._conn.execute(ddl)
+            self._conn.execute("INSERT INTO %s SELECT * FROM %s_old" % (table, table))
+            self._conn.execute("DROP TABLE %s_old" % table)
+            if indexes:
+                self._conn.executescript(indexes)
+            self._conn.commit()
 
     def close(self) -> None:
         """关闭所有线程的连接（不只是当前线程那条）。"""
@@ -269,7 +352,7 @@ class SqliteStateStore:
             self._conn.execute(
                 "INSERT INTO kb_chunks(chunk_id, doc_id, doc_type, title, text, lang, identifiers, "
                 "countries, hs_codes, tags, effective_from, effective_to, valid_until, kb_version, extra) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chunk_id) DO UPDATE SET "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(chunk_id, kb_version) DO UPDATE SET "
                 "doc_id=excluded.doc_id, doc_type=excluded.doc_type, title=excluded.title, "
                 "text=excluded.text, lang=excluded.lang, identifiers=excluded.identifiers, "
                 "countries=excluded.countries, hs_codes=excluded.hs_codes, tags=excluded.tags, "
@@ -310,17 +393,42 @@ class SqliteStateStore:
             for r in rows
         ]
 
-    def get_kb_chunk(self, chunk_id):
-        for c in self.list_kb_chunks():
-            if c.chunk_id == chunk_id:
-                return c
-        return None
+    def get_kb_chunk(self, chunk_id, kb_version=None):
+        """按块 ID 取块；给了 kb_version 就精确到那一个版本。
 
-    def clear_kb(self) -> None:
-        # 重灌秥识块不得连带删向量（R15-02）：向量与块一一对应，
+        复合主键之后同一 chunk_id 会在多个库版本下并存，
+        所以**必须能按版本取**（不指定版本时取版本号最小的那一个）。
+        """
+        sql = "SELECT * FROM kb_chunks WHERE chunk_id=?"
+        params = [chunk_id]
+        if kb_version:
+            sql += " AND kb_version=?"
+            params.append(kb_version)
+        sql += " ORDER BY kb_version"
+        rows = self._conn.execute(sql, params).fetchall()
+        if not rows:
+            return None
+        r = rows[0]
+        return KBChunk(
+            chunk_id=r["chunk_id"], doc_id=r["doc_id"], doc_type=r["doc_type"], title=r["title"],
+            text=r["text"], lang=r["lang"], identifiers=json.loads(r["identifiers"]),
+            countries=json.loads(r["countries"]), hs_codes=json.loads(r["hs_codes"]),
+            tags=json.loads(r["tags"]),
+            effective_from=datetime.fromisoformat(r["effective_from"]) if r["effective_from"] else None,
+            effective_to=datetime.fromisoformat(r["effective_to"]) if r["effective_to"] else None,
+            valid_until=datetime.fromisoformat(r["valid_until"]) if r["valid_until"] else None,
+            kb_version=r["kb_version"], extra=json.loads(r["extra"]),
+        )
+
+    def clear_kb(self, kb_version=None) -> None:
+        # 重灌知识块不得连带删向量（R15-02）：向量与块一一对应，
         # 块没变就不该删向量 —— 否则每次重灌都要全量重嵌（白花钱）。
+        # 给 kb_version 时**只清该版本**（双索引的前提：灌基线不能抹掉灰度版）。
         with self._write_lock:
-            self._conn.execute("DELETE FROM kb_chunks")
+            if kb_version:
+                self._conn.execute("DELETE FROM kb_chunks WHERE kb_version=?", (kb_version,))
+            else:
+                self._conn.execute("DELETE FROM kb_chunks")
             self._conn.commit()
 
     # ---------- 向量（S4） ----------
@@ -328,8 +436,8 @@ class SqliteStateStore:
         with self._write_lock:
             self._conn.execute(
                 "INSERT INTO kb_embeddings(chunk_id, kb_version, model, dim, vector, content_fp, updated_at) "
-                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(chunk_id) DO UPDATE SET "
-                "kb_version=excluded.kb_version, model=excluded.model, dim=excluded.dim, "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(chunk_id, kb_version) DO UPDATE SET "
+                "model=excluded.model, dim=excluded.dim, "
                 "vector=excluded.vector, content_fp=excluded.content_fp, updated_at=excluded.updated_at",
                 (chunk_id, kb_version, model, len(vector), _dumps([float(x) for x in vector]),
                  content_fp or "", datetime.now(timezone.utc).isoformat()),

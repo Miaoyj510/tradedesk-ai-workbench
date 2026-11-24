@@ -149,7 +149,7 @@ def test_only_one_canary_at_a_time():
     store, svc = _svc()
     _create(svc)
     with pytest.raises(ReleaseError) as ei:
-        _create(svc, components={"prompt_version": "1.1.0"}, regression_evidence="R1")
+        _create(svc, components={"prompt_version": "1.1.0"}, regression_evidence="R-001")
     assert ei.value.code == "canary_in_flight"
 
 
@@ -157,7 +157,7 @@ def test_duplicate_release_id_rejected():
     store, svc = _svc()
     _create(svc, release_id="REL-X")
     with pytest.raises(ReleaseError) as ei:
-        _create(svc, components={"prompt_version": "1.1.0"}, regression_evidence="R1",
+        _create(svc, components={"prompt_version": "1.1.0"}, regression_evidence="R-001",
                 release_id="REL-X")
     assert ei.value.code == "duplicate_release"
 
@@ -263,6 +263,47 @@ def test_alias_and_release_persist_across_restart(tmpdir_local):
     alias = store2.get_release_alias("knowledge")
     assert alias is not None and alias["components"]["kb_version"] == KB
     store2.close()
+
+
+def test_evidence_must_be_verifiable():
+    """证据不能是"随便写点什么"——否则"不允许跳过回归直接改 Prompt"就是空话。"""
+    store, svc = _svc()
+    with pytest.raises(ReleaseError) as ei:
+        _create(svc, components={"prompt_version": "1.2.0"},
+                regression_evidence="随便写点什么")
+    assert ei.value.code == "regression_evidence_unverifiable"
+    with pytest.raises(ReleaseError) as ei:
+        _create(svc, components={"list_version": "sanctions-2026.12-b"},
+                risk_evidence="随便写点什么")
+    assert ei.value.code == "risk_evidence_unverifiable"
+
+
+def test_same_chunk_id_can_live_in_two_kb_versions():
+    """复合主键：同名块在两个库版本下并存（双索引的前提）。"""
+    from tradedesk.data.kb_seed import build_demo_chunks
+    store = SqliteStateStore(":memory:")
+    v1 = build_demo_chunks("kb-v1")
+    v2 = build_demo_chunks("kb-v2")
+    for c in v1 + v2:
+        store.upsert_kb_chunk(c)
+    a = store.get_kb_chunk("KB-A-SPEC-X-200", "kb-v1")
+    b = store.get_kb_chunk("KB-A-SPEC-X-200", "kb-v2")
+    assert a is not None and b is not None
+    assert a.kb_version == "kb-v1" and b.kb_version == "kb-v2"
+    assert len(store.list_kb_chunks("kb-v1")) == len(v1)
+    assert len(store.list_kb_chunks("kb-v2")) == len(v2)
+
+
+def test_release_fills_in_an_unready_kb_version():
+    """灰度到一个"库里没块"的版本 → 建发布时必须把该版本补齐。"""
+    from tradedesk.data.kb_seed import build_demo_chunks
+    store = SqliteStateStore(":memory:")
+    svc = ReleaseService(store, baseline_components("kb-v1", LIST), observe_hours=24)
+    m = svc.create(components={"kb_version": "kb-brand-new"}, approver="张三",
+                   change_notes="切到新库版本", rollback_plan="回滚 knowledge 类别",
+                   pilot_companies=["New Co"])
+    assert m.components["kb_version"] == "kb-brand-new"
+    assert len(store.list_kb_chunks("kb-brand-new")) > 0
 
 
 def test_audit_chain_stays_valid_after_release_operations():

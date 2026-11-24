@@ -253,10 +253,15 @@ def build_demo_chunks(kb_version: str = KB_VERSION) -> List[KBChunk]:
 
 
 def load_kb(store, kb_version: str = KB_VERSION, replace: bool = True) -> int:
-    """把种子块写入存储（幂等）。返回块数量。"""
+    """把种子块写入存储（幂等）。返回块数量。
+
+    `replace=True` 只清**同一个库版本**的块，**不动其它版本**：
+    灌基线不能把正在灰度的版本抹掉 —— 这是"双索引 + 别名切换"的前提（PRD 13.4.8）。
+    早先这里是整库清空，等于"灌一次基线就毁掉所有灰度版本"，R22 实测复现。
+    """
     if replace:
         try:
-            store.clear_kb()
+            store.clear_kb(kb_version)
         except Exception:
             pass
     chunks = build_demo_chunks(kb_version)
