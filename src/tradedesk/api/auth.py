@@ -133,8 +133,13 @@ _SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 
 def auth_required() -> bool:
-    """是否强制鉴权（默认关，不打断审核与验证脚本）。"""
-    return os.environ.get("TRADEDESK_AUTH_REQUIRED", "0").strip().lower() in ("1", "true", "yes")
+    """是否强制鉴权（默认关，不打断审核与验证脚本）。
+
+    **只从 config 读**（`src/tradedesk/config.py` 是环境变量唯一真源），
+    不在这里另读一份 os.environ —— 两处各读一次迟早会不一致。
+    """
+    from ..config import get_settings
+    return bool(get_settings().auth_required)
 
 
 def login(username: str, password: str) -> Dict[str, Any]:

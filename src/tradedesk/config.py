@@ -88,6 +88,8 @@ class Config:
     host: str = "127.0.0.1"
     port: int = 8080
     env: str = "dev"
+    # 本地演示鉴权（S6-4）。默认关：开了会打断审核与验证脚本。
+    auth_required: bool = False
 
     @classmethod
     def load(cls, project_root: Optional[Path] = None, env_file: Optional[str] = None) -> "Config":
@@ -151,6 +153,7 @@ class Config:
             host=get("TRADEDESK_HOST", "127.0.0.1"),
             port=int(get("TRADEDESK_PORT", "8080")),
             env=get("TRADEDESK_ENV", "dev"),
+            auth_required=get("TRADEDESK_AUTH_REQUIRED", "0").strip().lower() in ("1", "true", "yes"),
         )
         # SQLite 路径按**项目根**解析成绝对路径，而不是相对当前工作目录。
         # 两个 agent 各有各的 worktree，相对路径会让两个进程共用同一个库文件

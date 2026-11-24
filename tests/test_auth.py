@@ -95,14 +95,20 @@ def test_role_catalog_covers_four_roles_and_price_visibility():
 def test_auth_is_off_by_default(monkeypatch):
     """鉴权默认关：否则审核与验证脚本会被拒。"""
     from tradedesk.api.auth import auth_required
+    from tradedesk.config import reset_settings
     monkeypatch.delenv("TRADEDESK_AUTH_REQUIRED", raising=False)
+    reset_settings()
     assert auth_required() is False
     monkeypatch.setenv("TRADEDESK_AUTH_REQUIRED", "1")
+    reset_settings()          # config 有缓存，改完环境变量要清一次
     assert auth_required() is True
+    reset_settings()
 
 
 def test_auth_required_blocks_business_endpoints(monkeypatch, tmpdir_local):
+    from tradedesk.config import reset_settings
     monkeypatch.setenv("TRADEDESK_AUTH_REQUIRED", "1")
+    reset_settings()
     store = SqliteStateStore(str(tmpdir_local / "req.db"))
     c = TestClient(create_app(AppContext(store=store)))
     try:
@@ -114,3 +120,4 @@ def test_auth_required_blocks_business_endpoints(monkeypatch, tmpdir_local):
         assert c.get("/workbench", headers={"X-Session-Token": tok}).status_code == 200
     finally:
         store.close()
+        reset_settings()
