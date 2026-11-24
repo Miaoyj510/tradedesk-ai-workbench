@@ -211,14 +211,28 @@ def audit_gray(svc) -> None:
               "（反空断言失败：拿到的不是灰度版本，这条断言就没证明力）"
               if a.source != "canary" else ""))
 
-    # G2 同一买家跨时间稳定（分桶是纯函数）
+    # G2 跨档位：同一企业的版本要么不变，要么**有据可查地**变
+    # （注意：灰度扩量本身就会让企业从稳定版切到灰度版，那是正常的；
+    #   真正的问题是**试点企业被静默踢出灰度**——它从"在测新版本"悄悄退回旧版本，
+    #   而发布记录里的灰度范围仍写着它。）
     first = svc.resolve(company="ACME Trading", lang="en")
     svc.advance(rel.release_id, now=datetime.now(timezone.utc) + timedelta(days=3))
     second = svc.resolve(company="ACME Trading", lang="en")
-    check("G2 同一企业跨时间（推进档位后）仍拿到同一版本",
-          first.components == second.components and first.source == "canary",
-          "推进前=%s / 推进后=%s" % (json.dumps(first.components, ensure_ascii=False),
-                                     json.dumps(second.components, ensure_ascii=False)))
+    still_canary = (second.source == "canary")
+    check("G2 试点企业在放量档（P20）仍在灰度内，不被静默踢出",
+          still_canary,
+          "推进前 source=%s / 推进后 source=%s；推进后 prompt_version=%s"
+          % (first.source, second.source, second.components.get("prompt_version"))
+          + ("（白名单只在 PILOT 档生效 → 试点企业被踢回稳定版）"
+             if not still_canary else ""))
+
+    # G2b 发布记录里的"灰度范围"必须与实际命中集合一致（留痕说的 = 做的）
+    recorded = list(getattr(svc.get(rel.release_id), "pilot_companies", []) or [])
+    hit = [c for c in recorded
+           if svc.resolve(company=c, lang="en").source == "canary"]
+    check("G2b 发布记录里的灰度范围与实际命中集合一致（留痕说的 = 做的）",
+          set(hit) == set(recorded),
+          "记录的白名单=%s，实际命中=%s" % ("、".join(recorded), "、".join(hit)))
 
     # G3 分桶确定性
     b1 = enterprise_bucket("ACME Trading")
