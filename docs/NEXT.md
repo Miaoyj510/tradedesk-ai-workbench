@@ -8,6 +8,8 @@
 > `docs/S4-AUDIT-R17.md`（S4 审核报告 R17）、`docs/S4-EVAL-BASELINE.md`（S4-4c 评测基线）、
 > `docs/S5-ACCEPTANCE.md`（S5 验收基线）、`docs/S5-AUDIT-R19.md`（S5 审核报告 R19）。
 
+| **作品集包装** | ✅ 已交卷：`docs/PORTFOLIO.md`（一页纸）、`docs/ARCHITECTURE.md`（5 张 mermaid 架构图，已用 mmdc 验过语法）、`docs/DEMO-SCRIPT.md`（3 分钟演示脚本 + 60 秒版 + 事故预案）、`docs/screenshots/`（3 张真数据截图）、README 顶部摘要 |
+
 ## 一、现在到哪了
 
 | 切片 | 状态 |

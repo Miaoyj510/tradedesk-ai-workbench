@@ -24,7 +24,8 @@ src/tradedesk/
   store/      base（接口）、sqlite_store、postgres_store —— 换后端业务代码零改动
   release/    发布与灰度（S6-3）：manifest（发布清单）、bucketing（按企业分桶）、service（推进 / 分类别回滚）
 scripts/      verify_s1…s6（自证）、audit_s2…s6（审核方断言）、eval_retrieval / eval_llm（评测）、release_cli（发布灰度命令行）、push.ps1（推送）
-docs/         S2…S6-ACCEPTANCE.md、审核报告 R9…R21、S4-EVAL-BASELINE.md、NEXT.md（状态卡）
+docs/         S2…S6-ACCEPTANCE.md、审核报告 R9…R21、S6-FIX-R22.md、S4-EVAL-BASELINE.md、NEXT.md（状态卡）
+             作品集：PORTFOLIO.md（一页纸）、ARCHITECTURE.md（架构图）、DEMO-SCRIPT.md（演示脚本）、screenshots/
 ```
 
 ## 三个角色 / 分支（WORKFLOW.md 第 1 节）
