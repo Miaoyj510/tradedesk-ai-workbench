@@ -5,6 +5,17 @@
    配色：检索所得 "Industrial slate + stock green" 运营控制台方案
    （替换 MASTER 的 AI 紫：合规类高密度界面需要冷静中性底 + 高对比语义色）
    ============================================================ */
+/* 角色可见域（S6-4）：**演示级，不是鉴权**——真实鉴权在生产环境用 OIDC（PRD D-11） */
+body.role-exec .pane-threads,
+body.role-exec .pane.conversation,
+body.role-exec .pane-review{display:none}
+body.role-exec .workbench{grid-template-columns:minmax(0,1fr)}
+body.role-compliance .draft-body{display:none}
+body.role-compliance .actions{display:none}
+.signout{font:inherit;font-size:var(--fs-xs);color:#94A3B8;background:transparent;border:1px solid rgba(255,255,255,.18);
+  border-radius:var(--radius-sm);padding:2px var(--space-md);cursor:pointer;min-height:26px}
+.signout:hover{color:#fff;border-color:rgba(255,255,255,.4)}
+.signout:focus-visible{outline:2px solid var(--color-accent);outline-offset:2px}
 :root{
   /* 主色：石板灰（结构） */
   --color-primary:#334155;        --color-on-primary:#FFFFFF;

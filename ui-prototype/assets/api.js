@@ -11,8 +11,9 @@ window.TDApi = (function () {
   }
 
   async function req(path, opts) {
+    const auth = (window.TDAuth && window.TDAuth.headers) ? window.TDAuth.headers() : {};
     const init = Object.assign({
-      headers: { 'Content-Type': 'application/json' }
+      headers: Object.assign({ 'Content-Type': 'application/json' }, auth)
     }, opts || {});
     if (init.body && typeof init.body !== 'string') {
       init.body = JSON.stringify(init.body);
@@ -24,6 +25,11 @@ window.TDApi = (function () {
     if (!res.ok) {
       const d = data && data.detail;
       const msg = (d && (d.message || d.code)) || ('HTTP ' + res.status);
+      // 会话失效（后端重启 / 过期）→ 清掉本地会话并回登录页
+      if (res.status === 401 && window.TDAuth && window.TDAuth.expired) {
+        window.TDAuth.expired();
+        return null;
+      }
       const err = new Error(msg);
       err.status = res.status;
       err.data = data;

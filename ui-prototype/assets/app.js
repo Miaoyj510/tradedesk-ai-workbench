@@ -70,6 +70,24 @@
   window.TD.toast = toast;
   D.toast = toast;
 
+  /* ================= 身份与角色可见域（S6-4） ================= */
+  let USER = null;
+
+  function applyUser(u) {
+    USER = u;
+    if (!u) return;
+    document.body.classList.add('role-' + u.role);
+    const el = document.getElementById('current-user');
+    if (el) el.innerHTML = '当前用户：<b>' + esc(u.name) + '</b>（' + esc(u.role_name) + '）';
+    const so = document.getElementById('signout');
+    if (so && !so.dataset.bound) {
+      so.dataset.bound = '1';
+      so.addEventListener('click', function () {
+        if (window.TDAuth) window.TDAuth.logout();
+      });
+    }
+  }
+
   /* ================= 数据源（mock / api） ================= */
   function setSourceBadge(text, kind) {
     const el = $('#data-source');
@@ -232,7 +250,7 @@
     } else if (t.draft) {
       const d = t.draft;
       const confColor = d.confidence >= 0.7 ? 'var(--color-success)' : 'var(--color-warning)';
-      html += '<div class="draft"><div class="draft-hd">' + icon('spark', 'icon-sm') + '<h3>Inquiry 草稿</h3>' +
+      html += '<div class="draft draft-body"><div class="draft-hd">' + icon('spark', 'icon-sm') + '<h3>Inquiry 草稿</h3>' +
         '<span class="badge badge-neutral">' + esc(d.lang.toUpperCase()) + ' 输出</span>' +
         '<span class="badge badge-info">置信度 ' + d.confidence.toFixed(2) + '</span>' +
         '<span class="badge badge-neutral">' + d.intent.map(i => esc(i)).join(' / ') + '</span>' +
@@ -531,6 +549,12 @@
   }
 
   document.addEventListener('DOMContentLoaded', async () => {
+    // 先确认身份：未登录就去登录页（登录页内已实现跳转）
+    if (window.TDAuth) {
+      const u = await window.TDAuth.require();
+      if (!u) return;
+      applyUser(u);
+    }
     await loadSource();
     initWorkbench(); initDashboard(); initKnowledge();
   });

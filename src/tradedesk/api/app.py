@@ -27,6 +27,14 @@ class InboundMessage(BaseModel):
     country: str = ""
 
 
+class LoginBody(BaseModel):
+    """登录请求体。
+
+    长度上限用于防滥用；**下界不在这里校验**——空值统一交给业务层，
+    由 login() 返回 `missing_credentials`（401），与"错误凭据"走同一套错误语义。
+    """
+    username: str = Field(default="", max_length=64)
+    password: str = Field(default="", max_length=128)
 
 
 class SignOffBody(BaseModel):
@@ -224,6 +232,72 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
         """
         from .workbench import build_workbench
         return build_workbench(app.state.ctx)
+
+    # ------------------------------------------------------------ 登录（S6-4）
+    @app.post("/auth/login")
+    def auth_login(body: LoginBody) -> Dict[str, Any]:
+        """账号密码登录，签发会话令牌。
+
+        失败时统一返回“账号或密码不正确”（不区分账号是否存在）。
+        **本地演示形态**：生产账号由 IT 通过 OIDC 提供（PRD D-11）。
+        """
+        from .auth import AuthError, login
+        try:
+            return login(body.username, body.password)
+        except AuthError as exc:
+            raise HTTPException(status_code=401,
+                                detail={"code": exc.code, "message": exc.message})
+
+    @app.post("/auth/logout")
+    def auth_logout(x_session_token: str = Header(default="")) -> Dict[str, Any]:
+        from .auth import logout
+        return {"ok": logout(x_session_token)}
+
+    @app.get("/auth/me")
+    def auth_me(x_session_token: str = Header(default="")) -> Dict[str, Any]:
+        """当前会话的用户（未登录返回 401）。"""
+        from .auth import session_user
+        user = session_user(x_session_token)
+        if user is None:
+            raise HTTPException(status_code=401,
+                                detail={"code": "not_authenticated", "message": "会话已失效，请重新登录"})
+        return {"user": user}
+
+    # ------------------------------------------------------------ 鉴权中间件（S6-4）
+    @app.middleware("http")
+    async def _session_guard(request, call_next):
+        """本地演示鉴权（默认关）。
+
+        为什么用中间件而不是每个端点上加依赖：一个就能统一防住，也不要求每个路由都想一次。
+        **默认关**（`TRADEDESK_AUTH_REQUIRED=0`），否则审核与验证脚本会被拒。
+        """
+        from .auth import auth_required, session_user
+        if not auth_required():
+            return await call_next(request)
+        path = request.url.path
+        public = (path in ("/health", "/auth/login", "/auth/roles", "/docs",
+                           "/openapi.json", "/redoc", "/")
+                  or path.startswith("/ui"))
+        if public:
+            return await call_next(request)
+        token = request.headers.get("X-Session-Token") or ""
+        if not session_user(token):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=401,
+                                content={"detail": {"code": "not_authenticated",
+                                                   "message": "请先登录"}})
+        return await call_next(request)
+
+    # ------------------------------------------------------------ 角色目录（S6-4）
+    @app.get("/auth/roles")
+    def auth_roles() -> Dict[str, Any]:
+        """角色与可见域定义。
+
+        **不是鉴权接口**：返回的是"演示身份可以看到什么"的规则目录，
+        本地 Demo 无鉴权（PRD 13.4.11），真实身份在生产环境用 OIDC（D-11）。
+        """
+        from .auth import role_catalog
+        return role_catalog()
 
     # ------------------------------------------------------------ 前端静态托管（S6-2）
     mount_ui(app)

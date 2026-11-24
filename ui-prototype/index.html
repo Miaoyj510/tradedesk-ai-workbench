@@ -39,8 +39,9 @@
 
     <div class="rail-foot">
       <div class="agent-chip"><span class="dot dot-live" aria-hidden="true"></span><span>本地 Docker · 云端模型 API</span></div>
-      <div style="margin-top:6px">当前用户：<b>李静</b>（外贸业务员）</div>
-      <div style="margin-top:2px">版本 v1.0 · 原型演示</div>
+      <div style="margin-top:6px" id="current-user">当前用户：<b>—</b></div>
+      <div style="margin-top:4px"><button type="button" class="signout" id="signout">切换身份</button></div>
+      <div style="margin-top:2px">版本 v1.0 · 本地 Demo</div>
     </div>
   </aside>
 
@@ -114,12 +115,13 @@
       <section class="pane conversation" id="conversation" aria-label="会话与草稿"></section>
 
       <!-- 右：签核与风控 -->
-      <section class="pane" id="review" aria-label="签核与风控"></section>
+      <section class="pane pane-review" id="review" aria-label="签核与风控"></section>
     </div>
   </main>
 </div>
 <div class="toast-host" aria-live="polite"></div>
 <script src="assets/config.js"></script>
+<script src="assets/auth.js"></script>
 <script src="assets/data.js"></script>
 <script src="assets/api.js"></script>
 <script src="assets/app.js"></script>

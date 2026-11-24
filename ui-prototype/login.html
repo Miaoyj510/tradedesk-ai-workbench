@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>登录 · TradeDesk AI 工作台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/styles.css">
+<style>
+  /* 登录页布局：左信任面板 + 右表单（Trust & Authority 模式） */
+  .auth-wrap{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(360px,.95fr);min-height:100vh}
+  .auth-side{background:var(--color-primary-strong);color:#E2E8F0;padding:var(--space-3xl);display:flex;flex-direction:column;justify-content:center;gap:var(--space-2xl)}
+  .auth-side h1{color:#fff;font-size:var(--fs-xl);margin:0 0 var(--space-sm);letter-spacing:-.01em}
+  .auth-side .sub{color:#94A3B8;font-size:var(--fs-sm);line-height:1.7;max-width:46ch}
+  .auth-claims{list-style:none;padding:0;margin:var(--space-xl) 0 0;display:grid;gap:var(--space-md)}
+  .auth-claims li{display:flex;gap:var(--space-md);align-items:flex-start;font-size:var(--fs-base);color:#CBD5E1}
+  .auth-claims b{color:#fff;font-weight:600}
+  .auth-claim-num{flex:0 0 auto;width:22px;height:22px;border-radius:6px;background:rgba(255,255,255,.1);
+    color:#fff;font:600 11px/22px var(--font-mono);text-align:center;margin-top:1px}
+  .auth-note{font-size:var(--fs-xs);color:#94A3B8;border-top:1px solid rgba(255,255,255,.12);padding-top:var(--space-lg);line-height:1.7}
+  .auth-main{display:flex;align-items:center;justify-content:center;padding:var(--space-3xl) var(--space-2xl);background:var(--color-background)}
+  .auth-card{width:100%;max-width:400px;background:var(--color-surface);border:1px solid var(--color-border);
+    border-radius:var(--radius-lg);box-shadow:var(--shadow-md);padding:var(--space-2xl)}
+  .auth-card h2{margin:0 0 var(--space-xs);font-size:var(--fs-lg);letter-spacing:-.01em}
+  .auth-card .lead{margin:0 0 var(--space-xl);color:var(--color-muted-foreground);font-size:var(--fs-sm)}
+  .field{margin-bottom:var(--space-lg)}
+  .field label{display:block;font-size:var(--fs-sm);font-weight:600;margin-bottom:var(--space-sm);color:var(--color-foreground)}
+  .field input{width:100%;min-height:44px;padding:var(--space-md) var(--space-lg);font:inherit;font-size:var(--fs-base);
+    color:var(--color-foreground);background:var(--color-surface);border:1px solid var(--color-border-strong);
+    border-radius:var(--radius-md);transition:border-color .18s ease,box-shadow .18s ease}
+  .field input:hover{border-color:#94A3B8}
+  .field input:focus{outline:none;border-color:var(--color-accent);box-shadow:0 0 0 3px rgba(37,99,235,.18)}
+  .field input[aria-invalid="true"]{border-color:var(--color-destructive)}
+  .pw-wrap{position:relative}
+  .pw-wrap input{padding-right:84px}
+  .pw-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);min-height:32px;padding:0 var(--space-md);
+    font:inherit;font-size:var(--fs-xs);color:var(--color-muted-foreground);background:transparent;border:1px solid transparent;
+    border-radius:var(--radius-sm);cursor:pointer}
+  .pw-toggle:hover{color:var(--color-foreground);background:var(--color-muted)}
+  .pw-toggle:focus-visible{outline:2px solid var(--color-accent);outline-offset:2px}
+  .err{display:none;margin-top:var(--space-sm);font-size:var(--fs-xs);color:var(--color-destructive)}
+  .err[data-show="1"]{display:block}
+  .form-alert{display:none;margin-bottom:var(--space-lg);padding:var(--space-md) var(--space-lg);font-size:var(--fs-sm);
+    color:var(--color-destructive);background:#FEF2F2;border:1px solid #FECACA;border-radius:var(--radius-md);line-height:1.6}
+  .form-alert[data-show="1"]{display:block}
+  .form-alert a{color:var(--color-destructive);font-weight:600}
+  .row-between{display:flex;align-items:center;justify-content:space-between;gap:var(--space-md);margin-bottom:var(--space-xl)}
+  .check{display:inline-flex;align-items:center;gap:var(--space-sm);font-size:var(--fs-sm);color:var(--color-muted-foreground);cursor:pointer}
+  .check input{width:16px;height:16px;accent-color:var(--color-accent);cursor:pointer}
+  .link-muted{font-size:var(--fs-sm);color:var(--color-muted-foreground);text-decoration:none;border-bottom:1px dashed var(--color-border-strong)}
+  .link-muted:hover{color:var(--color-foreground)}
+  .btn-submit{width:100%;min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:var(--space-sm);
+    font:600 var(--fs-base)/1 inherit;color:#fff;background:var(--color-accent);border:1px solid var(--color-accent);
+    border-radius:var(--radius-md);cursor:pointer;transition:filter .18s ease}
+  .btn-submit:hover:not(:disabled){filter:brightness(.94)}
+  .btn-submit:disabled{opacity:.65;cursor:not-allowed}
+  .btn-submit:focus-visible{outline:2px solid var(--color-accent);outline-offset:2px}
+  .demo{margin-top:var(--space-xl);border-top:1px solid var(--color-border);padding-top:var(--space-lg)}
+  .demo h3{margin:0 0 var(--space-sm);font-size:var(--fs-xs);letter-spacing:.06em;text-transform:uppercase;color:var(--color-muted-foreground)}
+  .demo-list{display:grid;gap:var(--space-sm);margin:0;padding:0;list-style:none}
+  .demo-list button{width:100%;display:flex;justify-content:space-between;gap:var(--space-md);align-items:center;
+    min-height:40px;padding:var(--space-sm) var(--space-lg);font:inherit;font-size:var(--fs-sm);text-align:left;
+    color:var(--color-foreground);background:var(--color-surface-alt);border:1px solid var(--color-border);
+    border-radius:var(--radius-sm);cursor:pointer}
+  .demo-list button:hover{border-color:var(--color-accent);background:#EFF6FF}
+  .demo-list button:focus-visible{outline:2px solid var(--color-accent);outline-offset:2px}
+  .demo-list .u{font-family:var(--font-mono);font-size:var(--fs-xs);color:var(--color-muted-foreground)}
+  .auth-foot{margin-top:var(--space-xl);font-size:var(--fs-xs);color:var(--color-muted-foreground);line-height:1.7}
+  .auth-foot a{color:var(--color-accent)}
+  @media (max-width:900px){
+    .auth-wrap{grid-template-columns:1fr}
+    .auth-side{padding:var(--space-2xl)}
+    .auth-claims{display:none}
+  }
+  @media (prefers-reduced-motion:reduce){
+    .auth-card *{transition:none !important}
+  }
+</style>
+</head>
+<body>
+<div class="auth-wrap">
+
+  <!-- 左：可信面板（产品边界与本地形态声明） -->
+  <aside class="auth-side">
+    <div>
+      <div style="display:flex;align-items:center;gap:var(--space-md);margin-bottom:var(--space-2xl)">
+        <span style="width:34px;height:34px;border-radius:9px;background:var(--color-accent);color:#fff;
+          display:inline-flex;align-items:center;justify-content:center;font-weight:700">T</span>
+        <span style="font-weight:600;color:#fff;letter-spacing:.01em">TradeDesk AI</span>
+      </div>
+      <h1>外贸业务员的 AI 数字员工工作台</h1>
+      <p class="sub">一条询盘从接收到回复，走过证据取证、安全核验与人工签核，
+        全程留痕可回溯。</p>
+      <ul class="auth-claims">
+        <li><span class="auth-claim-num">1</span><span><b>询盘自动应答</b><br>多语种证据召回，草稿带引用可回指</span></li>
+        <li><span class="auth-claim-num">2</span><span><b>报价人工签核</b><br>含价格、交期的草稿一律阻断出发，等人工确认</span></li>
+        <li><span class="auth-claim-num">3</span><span><b>合同必须人工确认</b><br>不自动签约、不自动定价、不自动付款</span></li>
+      </ul>
+    </div>
+    <div class="auth-note">
+      <b style="color:#E2E8F0">本地演示形态</b><br>
+      账号与密码为本地演示凭据，会话存于浏览器本地。<br>
+      生产环境用企业账号 + SSO（OIDC），见 PRD 13.4.11 与 D-11，本期不实现。
+    </div>
+  </aside>
+
+  <!-- 右：登录表单 -->
+  <main class="auth-main">
+    <div class="auth-card">
+      <h2>登录</h2>
+      <p class="lead">请输入你的工作台账号。</p>
+
+      <!-- 错误摘要：置顶、可键盘定位、每条链到对应字段（ui-ux-pro-max 规则） -->
+      <div class="form-alert" id="form-alert" role="alert" tabindex="-1" aria-labelledby="alert-title">
+        <b id="alert-title">登录不成功</b>
+        <div id="alert-body"></div>
+      </div>
+
+      <form id="login-form" novalidate>
+        <div class="field">
+          <label for="username">账号</label>
+          <input id="username" name="username" type="text" autocomplete="username"
+                 autocapitalize="none" spellcheck="false" required
+                 aria-describedby="err-username" placeholder="sales">
+          <div class="err" id="err-username" role="alert"></div>
+        </div>
+
+        <div class="field">
+          <label for="password">密码</label>
+          <div class="pw-wrap">
+            <input id="password" name="password" type="password" autocomplete="current-password"
+                   required aria-describedby="err-password" placeholder="········">
+            <button type="button" class="pw-toggle" id="pw-toggle" aria-pressed="false"
+                    aria-controls="password">显示密码</button>
+          </div>
+          <div class="err" id="err-password" role="alert"></div>
+        </div>
+
+        <div class="row-between">
+          <label class="check"><input type="checkbox" id="remember" checked> 记住我</label>
+          <a class="link-muted" href="#" aria-disabled="true"
+             title="本地演示形态：没有密码重置流程">忘记密码？</a>
+        </div>
+
+        <button type="submit" class="btn-submit" id="submit">登录</button>
+      </form>
+
+      <div class="demo">
+        <h3>本地演示账号</h3>
+        <ul class="demo-list" id="demo-list"></ul>
+        <p class="auth-foot" style="margin-top:var(--space-md)">
+          演示凭据仅限本地 Demo，不是生产凭据。角色由账号决定（PRD 11.2 的四类可见域）。
+        </p>
+      </div>
+
+      <p class="auth-foot">
+        TradeDesk-AI · 本地 Demo v1.0 · 推理与签核全程留痕
+      </p>
+    </div>
+  </main>
+</div>
+
+<script src="assets/auth.js"></script>
+<script>
+(function () {
+  var form = document.getElementById('login-form');
+  var alertBox = document.getElementById('form-alert');
+  var alertBody = document.getElementById('alert-body');
+  var submitBtn = document.getElementById('submit');
+  var pwInput = document.getElementById('password');
+  var pwToggle = document.getElementById('pw-toggle');
+
+  function fieldError(id, msg) {
+    var el = document.getElementById(id);
+    var input = document.getElementById(id.replace('err-', ''));
+    if (msg) {
+      el.textContent = msg;
+      el.setAttribute('data-show', '1');
+      if (input) input.setAttribute('aria-invalid', 'true');
+    } else {
+      el.textContent = '';
+      el.removeAttribute('data-show');
+      if (input) input.removeAttribute('aria-invalid');
+    }
+  }
+
+  function showAlert(msg) {
+    alertBody.textContent = msg;
+    alertBox.setAttribute('data-show', '1');
+    alertBox.focus();
+  }
+  function hideAlert() {
+    alertBox.removeAttribute('data-show');
+    alertBody.textContent = '';
+  }
+
+  /* 密码可见切换（ui-ux-pro-max：Password Visibility） */
+  pwToggle.addEventListener('click', function () {
+    var shown = pwInput.type === 'text';
+    pwInput.type = shown ? 'password' : 'text';
+    pwToggle.setAttribute('aria-pressed', shown ? 'false' : 'true');
+    pwToggle.textContent = shown ? '显示密码' : '隐藏密码';
+    pwInput.focus();
+  });
+
+  /* 演示账号列表（来自后端的角色目录，不在前端写死） */
+  fetch('/auth/roles').then(function (r) { return r.json(); }).then(function (d) {
+    var ul = document.getElementById('demo-list');
+    (d.demo_accounts || []).forEach(function (a) {
+      var li = document.createElement('li');
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.innerHTML = '<span>' + a.name + ' · ' + a.role_name + '</span>' +
+                    '<span class="u">' + a.username + ' / ' + a.password + '</span>';
+      b.addEventListener('click', function () {
+        document.getElementById('username').value = a.username;
+        document.getElementById('password').value = a.password;
+        document.getElementById('password').focus();
+      });
+      li.appendChild(b);
+      ul.appendChild(li);
+    });
+  }).catch(function () {
+    var ul = document.getElementById('demo-list');
+    ul.innerHTML = '<li style="font-size:var(--fs-xs);color:var(--color-muted-foreground);line-height:1.7">' +
+      '后端没有启动，登录不可用。<br>' +
+      '请先跑起服务（`dev.ps1 serve`），再回来登录。</li>';
+  });
+
+  /* 会话过期提示 */
+  if (/[?&]expired=1/.test(location.search)) {
+    showAlert('会话已过期或服务已重启，请重新登录。');
+  }
+
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    hideAlert();
+    var u = document.getElementById('username').value.trim();
+    var p = pwInput.value;
+    fieldError('err-username', u ? '' : '请输入账号');
+    fieldError('err-password', p ? '' : '请输入密码');
+    if (!u || !p) {
+      showAlert('请先补齐账号与密码。');
+      return;
+    }
+    submitBtn.disabled = true;
+    submitBtn.textContent = '登录中…';
+    window.TDAuth.login(u, p).then(function () {
+      // 登录成功 = 进真实产品（读模型）；不再默认走 mock
+      var next = new URLSearchParams(location.search).get('next');
+      location.replace(next ? next + (next.indexOf('?') >= 0 ? '&' : '?') + 'source=api'
+                              : 'index.html?source=api');
+    }).catch(function (err) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = '登录';
+      fieldError('err-password', '账号或密码不正确');
+      showAlert('账号或密码不正确。');
+    });
+  });
+})();
+</script>
+</body>
+</html>
