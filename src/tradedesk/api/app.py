@@ -67,6 +67,22 @@ class AdvanceBody(BaseModel):
     to_stage: str
 
 
+class KbImportBody(BaseModel):
+    """企业知识库导入请求体（S6-5）。
+
+    `dry_run` **默认 true**：导入是破坏性动作，先看校验报告再确认。
+    内容可以传明文 `content`，也可以传 base64（`content_b64`，二进制文件）。
+    """
+    filename: str = ""
+    format: str = "auto"
+    content: str = ""
+    content_b64: str = ""
+    mapping: Dict[str, str] = Field(default_factory=dict)
+    kb_version: str = ""
+    dry_run: bool = True
+    skip_bad_rows: bool = False
+
+
 class ReleaseCreateBody(BaseModel):
     """建发布请求体（S6-3）。
 
@@ -331,6 +347,79 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
         """
         from .auth import role_catalog
         return role_catalog()
+
+    # ------------------------------------------------------------ 知识库导入（S6-5）
+    @app.get("/kb/versions")
+    def kb_versions() -> Dict[str, Any]:
+        """库版本清单：版本号 / 块数 / 向量数。
+
+        导入完是**新版本**，不是覆盖旧版本 —— 所以这里能同时看到多个版本并存，
+        这正是双索引（别名切换）能成立的前提。
+        """
+        return {"versions": app.state.ctx.store.list_kb_versions()}
+
+    @app.post("/kb/import")
+    def kb_import(body: KbImportBody,
+                  x_session_token: str = Header(default="")) -> Dict[str, Any]:
+        """导入企业知识库 → 新的库版本（默认干跑：只校验不落库）。
+
+        权限口径：导入是**发布链路的一部分**，走与建发布同一套角色闸门
+        （`release` 能力），而不是对外动作的闸门令牌 —— 闸门令牌管的是
+        "发给买家的东西"，导入不是对外动作。
+        """
+        from ..data.kb_import import decode_content, import_kb
+        approver, denied = _release_guard(x_session_token, "")
+        if denied is not None:
+            raise denied
+        try:
+            content = decode_content(body.content, body.content_b64)
+            report = import_kb(app.state.ctx.store, content=content,
+                              filename=body.filename, fmt=body.format,
+                              mapping=body.mapping, kb_version=body.kb_version,
+                              actor=approver or "local", dry_run=body.dry_run,
+                              skip_bad_rows=body.skip_bad_rows)
+        except ValueError as exc:
+            raise HTTPException(status_code=422,
+                                 detail={"code": "invalid_content", "message": str(exc)})
+        return report.as_dict()
+
+    @app.post("/kb/versions/{version}/index")
+    def kb_index_version(version: str,
+                          x_session_token: str = Header(default="")) -> Dict[str, Any]:
+        """给某个库版本建向量索引（**显式动作**：会调云端嵌入 API、计费）。
+
+        为什么不自动建：嵌入是**计费**的，而且索引是**发布流水线**的一步
+        （PRD 13.4.8），不该在启动时或导入时偷偷发生。
+
+        没有真嵌入器时用占位嵌入器建（结构上能跑通链路），
+        但返回里**明确标注**"占位向量、稠密通道不启用"——
+        占位向量没有语义能力，不能对外宣称有语义召回。
+        """
+        from ..retrieval.embedders import NullEmbedder
+        from ..retrieval.indexer import embedder_tag, index_kb
+        approver, denied = _release_guard(x_session_token, "")
+        if denied is not None:
+            raise denied
+        blocks = app.state.ctx.store.list_kb_chunks(version)
+        if not blocks:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "version_not_found",
+                         "message": "库里没有库版本 %s（先导入或检查版本号）" % version})
+        embedder = app.state.ctx.embedder
+        notes: List[str] = []
+        if embedder is None:
+            embedder = NullEmbedder()
+            notes.append("未配置嵌入器：已用**占位向量**建索引，稠密通道不启用"
+                         "（占位向量没有语义能力，不能当作语义召回）")
+        try:
+            res = index_kb(app.state.ctx.store, embedder, version, chunks=blocks)
+        except Exception as exc:
+            raise HTTPException(status_code=502,
+                                detail={"code": "index_failed", "message": str(exc)[:300]})
+        return {"kb_version": version, "indexed": res.get("indexed", 0),
+                "skipped": res.get("skipped", 0),
+                "embedder": embedder_tag(embedder), "notes": notes}
 
     # ------------------------------------------------------------ 发布与灰度（S6-3）
     def _release_service():

@@ -534,6 +534,11 @@
       + '<button type="button" class="drawer-close" id="agent-drawer-close" aria-label="关闭">×</button></div>'
       + '<div class="drawer-body" id="agent-drawer-body"></div></div>';
     document.body.appendChild(drawer);
+    // 关闭事件的绑定必须**跟着创建走**：抽屉是点击时才出现的，
+    // 在页面加载时绑定根本绑不上（那时元素还不存在）—— 叉号点了没反应就是这么来的。
+    const closeBtn = drawer.querySelector('#agent-drawer-close');
+    if (closeBtn) closeBtn.addEventListener('click', closeAgentDrawer);
+    drawer.addEventListener('click', e => { if (e.target === drawer) closeAgentDrawer(); });
     return drawer;
   }
 
@@ -608,11 +613,145 @@
     $$('[data-agent-id]').forEach(b => {
       b.addEventListener('click', () => openAgentDrawer(b.dataset.agentId));
     });
-    const close = $('#agent-drawer-close');
-    if (close) close.addEventListener('click', closeAgentDrawer);
-    const drawer = $('#agent-drawer');
-    if (drawer) drawer.addEventListener('click', e => { if (e.target === drawer) closeAgentDrawer(); });
+    // 关闭按钮与遮罩的绑定在 ensureAgentDrawer() 里（元素创建时才绑）；
+    // 这里只负责 ESC —— 它是 document 级的，与抽屉是否已创建无关。
     document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAgentDrawer(); });
+  }
+
+  /* ================= 企业知识库导入（S6-5） ================= */
+  /* 为什么放在知识库页而不是设置页：导入的是**检索语料**，不是配置。
+     链路是：文件 → 校验报告 → 确认导入（新库版本）→ 显式建索引（计费）
+     → 走发布流程灰度 → 出问题按 knowledge 类别回滚。
+     注意：**导入完不会自动生效** —— 当前检索仍走已发布的库版本，
+     这是"发布与回滚"存在的意义（不能改一下库就悄悄影响正在服务的买家）。 */
+  function initKbImport() {
+    const fileInput = $('#kb-import-file');
+    if (!fileInput) return;
+    const report = $('#kb-import-report');
+    const previewBtn = $('#kb-import-preview');
+    const commitBtn = $('#kb-import-commit');
+    const indexBtn = $('#kb-import-index');
+    let fileText = '';
+    let fileName = '';
+    let pendingVersion = '';
+
+    if (currentSource !== 'api' || !window.TDApi || !window.TDApi.kbImport) {
+      if (report) {
+        report.innerHTML = '<div class="note-box is-warn">演示数据（mock）模式下不能导入 —— '
+          + '导入会写库，属于真数据操作。用 <code>?source=api</code> 打开后端托管页面再试。</div>';
+      }
+      [previewBtn, commitBtn, indexBtn].forEach(b => { if (b) b.disabled = true; });
+      return;
+    }
+
+    fileInput.addEventListener('change', e => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      fileName = f.name;
+      const reader = new FileReader();
+      reader.onload = () => {
+        fileText = String(reader.result || '');
+        if (report) {
+          report.innerHTML = '<div class="note-box is-ok">已读取 <b>' + esc(fileName) + '</b>（'
+            + Math.max(1, Math.round(fileText.length / 1024)) + ' KB）。点「预览校验」看结果。</div>';
+        }
+        if (commitBtn) commitBtn.disabled = true;
+        if (indexBtn) indexBtn.disabled = true;
+      };
+      reader.readAsText(f, 'utf-8');
+    });
+
+    function renderReport(r, title) {
+      if (!report) return;
+      const stats = '<div class="kb-stat">'
+        + '<div><b>' + r.total_rows + '</b><span>总行数</span></div>'
+        + '<div><b>' + r.accepted + '</b><span>通过</span></div>'
+        + '<div><b>' + r.rejected + '</b><span>拒绝</span></div>'
+        + '<div><b>' + esc(r.kb_version) + '</b><span>目标库版本</span></div></div>';
+      const errRows = (r.errors || []).map(e => '<tr class="is-error"><td class="is-num">' + e.row
+        + '</td><td>' + esc(e.field) + '</td><td>' + esc(e.message) + '</td></tr>').join('');
+      const warnRows = (r.warnings || []).map(e => '<tr class="is-warn"><td class="is-num">' + e.row
+        + '</td><td>' + esc(e.field) + '</td><td>' + esc(e.message) + '</td></tr>').join('');
+      let html = '<div class="note-box ' + (r.rejected ? 'is-warn' : 'is-ok') + '"><b>' + esc(title) + '</b>'
+        + (r.dry_run ? '（干跑：没有落库）' : '（已落库 ' + r.written + ' 块）')
+        + (r.rejected
+          ? '：有错误行，<b>整批未落库</b> —— 请改文件后重试。'
+          : '：校验通过。')
+        + '</div>' + stats;
+      if (errRows) {
+        html += '<table class="data-table"><thead><tr><th>行</th><th>字段</th><th>问题</th></tr></thead><tbody>'
+          + errRows + '</tbody></table>';
+      }
+      if (warnRows) {
+        html += '<table class="data-table"><thead><tr><th>行</th><th>字段</th><th>提醒</th></tr></thead><tbody>'
+          + warnRows + '</tbody></table>';
+      }
+      report.innerHTML = html;
+    }
+
+    async function loadKbVersions() {
+      const host = $('#kb-versions');
+      if (!host) return;
+      try {
+        const r = await window.TDApi.kbVersions();
+        const rows = (r.versions || []).map(v => '<tr><td>' + esc(v.kb_version)
+          + '</td><td class="is-num">' + v.chunks + '</td><td class="is-num">' + v.vectors + '</td></tr>').join('');
+        host.innerHTML = '<table class="data-table"><thead><tr><th>库版本</th><th>块数</th><th>向量数</th></tr></thead><tbody>'
+          + (rows || '<tr><td colspan="3">暂无</td></tr>') + '</tbody></table>';
+        const hint = $('#kb-versions-hint');
+        if (hint) hint.textContent = (r.versions || []).length + ' 个版本并存';
+      } catch (err) {
+        if (host) host.innerHTML = '<div class="note-box is-warn">读取版本清单失败：' + esc(err.message) + '</div>';
+      }
+    }
+
+    if (previewBtn) {
+      previewBtn.addEventListener('click', async () => {
+        if (!fileText) { toast('先选一个 CSV / JSON 文件', 'warn'); return; }
+        try {
+          const r = await window.TDApi.kbImport({ filename: fileName, content: fileText, dry_run: true });
+          renderReport(r, '预览校验');
+          pendingVersion = r.kb_version;
+          if (commitBtn) commitBtn.disabled = !(r.accepted > 0);
+          if (indexBtn) indexBtn.disabled = true;
+        } catch (err) {
+          toast('预览失败：' + err.message, 'danger');
+        }
+      });
+    }
+
+    if (commitBtn) {
+      commitBtn.addEventListener('click', async () => {
+        if (!fileText) return;
+        try {
+          const r = await window.TDApi.kbImport({ filename: fileName, content: fileText, dry_run: false });
+          renderReport(r, '导入完成');
+          pendingVersion = r.kb_version;
+          if (indexBtn) indexBtn.disabled = !(r.written > 0);
+          if (commitBtn) commitBtn.disabled = true;
+          toast('已导入为新库版本 ' + r.kb_version + '（尚未发布，检索仍走当前版本）', '');
+          loadKbVersions();
+        } catch (err) {
+          toast('导入失败：' + err.message, 'danger');
+        }
+      });
+    }
+
+    if (indexBtn) {
+      indexBtn.addEventListener('click', async () => {
+        if (!pendingVersion) return;
+        try {
+          const r = await window.TDApi.kbIndexVersion(pendingVersion);
+          toast('已为 ' + r.kb_version + ' 建索引：' + r.indexed + ' 块', '');
+          (r.notes || []).forEach(n => toast(n, 'warn'));
+          loadKbVersions();
+        } catch (err) {
+          toast('建索引失败：' + err.message, 'danger');
+        }
+      });
+    }
+
+    loadKbVersions();
   }
 
   /* ================= 运营看板 ================= */
@@ -768,6 +907,6 @@
       applyUser(u);
     }
     await loadSource();
-    initWorkbench(); initDashboard(); initKnowledge(); initAgentRail();
+    initWorkbench(); initDashboard(); initKnowledge(); initAgentRail(); initKbImport();
   });
 })();

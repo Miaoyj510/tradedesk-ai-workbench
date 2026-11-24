@@ -56,6 +56,7 @@
 | **S3** | Sentinel 名单核验 + Inquiry 草稿装配 + 检索骨架 | ✅ 已完成（R11/R12/R14 审核 → R13/R16 修复） | `python scripts/verify_s3.py`（52 项）+ `dev.ps1 audit3`（90 项） |
 | **S4** | 检索层：词法 + 结构化 + 稠密三通道 RRF（BGE-M3 / pgvector 可替换）+ 评测基线 | ✅ 已完成（R15/R17 审核 → R16/R18 修复；语料扩量见 `docs/NEXT.md` S4-4c 续） | `python scripts/verify_s4.py`（60 项）+ `dev.ps1 audit4`（SQLite 78 / PG 85 项） |
 | **S5** | 多云厂商 provider 层（5 家）+ 真模型出稿 + 成本落库 + 分语种评测 | ✅ 已完成（R19 审核 → R20 修复） | `python scripts/verify_s5.py`（离线 18 项）+ `dev.ps1 audit5`（54 项） |
+| **S6-5** | 企业知识库导入：CSV/JSON → 字段映射与校验 → 新库版本 → 显式建索引 → 走发布灰度 | ✅ 已交卷 | `python -m pytest tests/test_kb_import.py -q`（19 项） |
 | **S6** | 前端联调 + 镜像构建 + 灰度回滚 | ✅ 五个切片全部交卷（1a / 1b / 2 / 3 / 4；S6-3 待审核核验） | `python scripts/verify_s6.py`（Python 24 + Node 27 项）+ `dev.ps1 audit6`（49 + 渲染层 15 项）+ `python scripts/verify_s6_3.py`（91 项 × 双后端） |
 
 ## 本机环境（已实测）
@@ -76,7 +77,7 @@ $dev = "D:\桌面\AIagent_project\外贸项目\dev.ps1"
 & $dev up        # 起 PostgreSQL 16(5433) + Redis 7(6380)
 & $dev check     # 交付前自检（十三步）：语法 + S1 双后端 + S2/S3 自证 + pytest + S2…S6/S6-3 独立审核
 & $dev verify    # 双后端验证（S1，53 项 × 2）
-& $dev test      # pytest（262 项）
+& $dev test      # pytest（280 项）
 & $dev status    # 看容器与端口
 & $dev push      # 推送当前分支到 GitHub（git 优先，失败自动切 API）
 & $dev release   # 发布与灰度命令行（status / create / advance / rollback / resolve）
