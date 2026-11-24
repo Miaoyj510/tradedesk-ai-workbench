@@ -32,13 +32,14 @@
 | **S5-1a（真模型出草稿）** | ✅ 交卷（`agent-a`）：占位符机制（模型看不到价格真值）+ 越权判定 + 降级回模板 |
 | **S5-1b（成本落库 + 签核留痕）** | ✅ 交卷：`llm_usage` 表（SQLite + PostgreSQL 双后端口径一致）+ `GET /usage/costs` + 签核留痕记草稿出处与成本 |
 | **S5-1c（模型层分语种评测）** | ✅ 交卷：`scripts/eval_llm.py`（离线两层自检 + 真实层）；真实 MiniMax-M3：en/es/ar 出稿 100% / 越权 0% / **事实保真 100%** / ¥0.0154~0.0182 每条 |
-│ S5 收口（PRD 14.3 回填） | ✅ 已回填（14.3 新增 V-20~V-23、12.6 实测成本、1.2 版本记录）；前端联调属 S6 |
+| S5 收口（PRD 14.3 回填） | ✅ 已回填（14.3 新增 V-20~V-23、12.6 实测成本、1.2 版本记录）；前端联调属 S6 |
 | **S5 审核 R19** | ✅ 核验完成（分支 `agent-b`）：断言 **54 项**，**13 FAIL → 13 个根因**（见 `docs/S5-AUDIT-R19.md`）—— **✅ 已由 R20 修完**（`agent-a @ 623ca24`，13 个根因逐条修 + S5 独立审核入 `check` 第十步） |
 | **S6-1a（工作台读模型 BFF）** | ✅ 交卷：`GET /workbench` 聚合读模型（形状与 mock 同构）+ 买家原话留痕 |
 | **S6-1b（前端接真数据）** | ✅ 交卷：`config.js` 开关 + `api.js` 客户端 + `app.js` 真数据分支；`scripts/verify_s6.py`（Python 24 项 + Node 27 项） |
-| S6-2（镜像与 compose：前端随应用同源托管） | ⬜ 进行中（静态托管 + compose app 服务 + 容器采用 PostgreSQL） |
+| S6-2（镜像与 compose：前端随应用同源托管） | ✅ 交卷（`agent-a @ 3879586`，含 `8cf1016` 补充）—— **不在 R21 审核范围内** |
+| S6-4（登录与角色可见域） | ✅ 交卷（`agent-a @ b0d6914`，含 `cfa332a` 修正）—— **不在 R21 审核范围内** |
 | S6-3（灰度与回滚：发布单元 + 流量分桶 + 一键回滚） | ⬜ 未开始 |
-| **S6 审核 R21（S6-1a + S6-1b）** | ✅ 核验完成（分支 `agent-b`）：断言 **64 项**（Python 49 + 渲染层 15），**23 FAIL → 12 个根因**（见 `docs/S6-AUDIT-R21.md`）—— **⚠️ 全部未修**；`dev.ps1 audit6` 可复核 |
+| **S6 审核 R21（S6-1a + S6-1b）** | ✅ 核验完成（分支 `agent-b`）：断言 **64 项**（Python 49 + 渲染层 15），**23 FAIL → 12 个根因**（见 `docs/S6-AUDIT-R21.md`）—— **⚠️ 实现 agent 修复中**（`agent-a` 工作区已在改 workbench/app.js/看板）；`dev.ps1 audit6` 可复核 |
 | S6（前端联调 + 镜像 + 灰度回滚） | ⬜ 未开始 |
 
 `dev.ps1 check` 现在是**九步**：语法 → S1 双后端 53/53 → S2 自证 97/97 →
@@ -295,15 +296,30 @@ S6 的审核断言（`scripts/audit_s6.py` 49 项 + `scripts/audit_s6_ui.js` 15 
 S3 已走完这条路径：`agent-a`(`3e86884`) → `main`(`e9b8278`)，三线远端 SHA 已核对一致；
 R11 审核线已合入 `main`(`8a8d8a7`)。
 
-**R19 审核线在 `agent-b` 上**（含 `scripts/audit_s5.py`、`docs/S5-AUDIT-R19.md`
-与 `dev.ps1 audit5`）——注意：本轮**没有**把 `audit5` 放进 `check`（铁律六要求
-"提交前 check 全绿"，而审核线是红的）→ **这条线合进 `main` 不会让 `check` 变红**。
-实现 agent 修完 R19 的 13 个根因后，再把 `audit5` 作为**第十步**加进 `check`
-（那时它必须全绿，否则就是回归）。
+**R19 审核线已收口**：实现 agent 在 `agent-a @ 623ca24`（轮次名 **R20**）修完 13 个根因，
+并把 `audit5` 加进 `check`（第十步）。
 
-**R21 审核线也在 `agent-b` 上**（含 `scripts/audit_s6.py`、`scripts/audit_s6_ui.js`、
-`docs/S6-AUDIT-R21.md` 与 `dev.ps1 audit6`）——同样**没有**放进 `check`，
-理由与 R19 一样。修完 R21 的 12 个根因后再决定是否加进门禁。
+**R21 审核线在 `agent-b` 上**（含 `scripts/audit_s6.py`、`scripts/audit_s6_ui.js`、
+`docs/S6-AUDIT-R21.md` 与 `dev.ps1 audit6`）。
+
+### ⚠️ 给实现 agent 的合并协调说明（2026-11-24）
+
+1. **轮次编号**：`R20` 已被你用于「修 R19 缺陷」那一轮，所以本轮 S6 审核叫 **R21**，
+   报告是 `docs/S6-AUDIT-R21.md`（不是 R20）。
+2. **你合的是改名前的提交**：`agent-a @ e614720` 合入的是 `1f8d83c`（当时文件还叫
+   `S6-AUDIT-R20.md`）。审核方随后把两个提交压成了一个 `043e92c`（含 R20→R21 改名）。
+   **再合一次 `agent-b` 时会有预期内的冲突**：`dev.ps1` / `docs/NEXT.md` / `CLAUDE.md` /
+   `scripts/audit_s6.py` / `scripts/audit_s6_ui.js`，且会同时出现
+   `S6-AUDIT-R20.md` 与 `S6-AUDIT-R21.md` 两个文件 —— **保留 R21、删掉 R20**，
+   引用统一指向 R21。
+3. **`dev.ps1` 里现在有两个 `"audit6"` 分支**（你加的一个 + 审核线合进去的一个）。
+   PowerShell `switch` 只命中第一个，第二个是死代码 —— 合并时**去重留一个**。
+4. **`check` 第十一步（S6 独立审核）现在是红的**（R21 的 12 个根因未修完）。
+   铁律六要求提交前 `check` 全绿 —— **修完再提交**，或者先把第十一步摘出来、
+   修完再挂回去。二选一，别带着红门禁提交。
+5. 审核基线是 `6e432fc`；你后来的 S6-2 / S6-4 不在本轮范围内。
+   已逐条核对：**12 个根因在你的新基线上全部仍成立**（转义、CN-2211、库版本、
+   sent/draftReady/budget 等都还在）。修完后按新基线重跑 `audit6` 复审。
 
 R17 的审核线已按 `agent-b` → `agent-a`（R18 修完）→ `main`(`16472bc`) 走完，
 `check` 第九步现在是绿的。
