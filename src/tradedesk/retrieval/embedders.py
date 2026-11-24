@@ -100,7 +100,8 @@ class RemoteEmbedder:
     def __init__(self, base_url: str, api_key: str, model: str = "embo-01",
                  dim: int = 1536, timeout_s: int = 30, retries: int = 2,
                  batch_size: int = 16, provider: str = "minimax",
-                 group_id: str = "", transport: Optional[Transport] = None) -> None:
+                 group_id: str = "", transport: Optional[Transport] = None,
+                 embedding_path: str = "") -> None:
         if not base_url:
             raise ValueError("RemoteEmbedder 需要 base_url")
         if not api_key:
@@ -114,12 +115,18 @@ class RemoteEmbedder:
         self.batch_size = max(1, batch_size)
         self.provider = provider
         self.group_id = group_id
+        # 厂商表里的路径（R19-13）；留空则用默认值（为旧调用方容错）。
+        self.embedding_path = embedding_path
         self._transport = transport or _urllib_transport
         self.calls = 0          # 调用计数，用于计量与成本监控
 
     # ---- 请求组装 ----
     def _url(self) -> str:
-        url = f"{self.base_url}/v1/embeddings"
+        # 路径来自厂商表（R19-13）：写死 "/v1/embeddings" 会让表里的 embedding_path 对 MiniMax 变成非唯一真源。
+        path = self.embedding_path or "/v1/embeddings"
+        if not path.startswith("/"):
+            path = "/" + path
+        url = f"{self.base_url}{path}"
         if self.provider == "minimax" and self.group_id:
             url = f"{url}?GroupId={self.group_id}"
         return url

@@ -37,14 +37,21 @@ def summarize_llm_usage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     degraded = 0
     tokens = {"prompt_tokens": 0, "completion_tokens": 0,
               "cached_tokens": 0, "total_tokens": 0}
+    # http_calls = **发起过调用的行数**（即调用轮次）；http_attempts = 各行实际尝试次数之和（含重试）。
+    # 为什么不直接求和（R19-04）：落库的是“本次调用数”，而不是“进程累计值”；
+    # 若将累计值直接求和，N 条询盘会显示 N(N+1)/2 次调用 —— 成本看板不可用。
     http_calls = 0
+    http_attempts = 0
     max_cost: Optional[float] = None
     by_lang: Dict[str, Dict[str, Any]] = {}
     by_day: Dict[str, Dict[str, Any]] = {}
     for r in rows:
         for k in tokens:
             tokens[k] += int(r.get(k) or 0)
-        http_calls += int(r.get("http_calls") or 0)
+        attempts = int(r.get("http_calls") or 0)
+        http_attempts += attempts
+        if attempts > 0:
+            http_calls += 1
         if r.get("degraded"):
             degraded += 1
         cost = r.get("cost_cny")
@@ -78,6 +85,7 @@ def summarize_llm_usage(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "cached_tokens": tokens["cached_tokens"],
         "total_tokens": tokens["total_tokens"],
         "http_calls": http_calls,
+        "http_attempts": http_attempts,
         "degraded_count": degraded,
         "priced_count": priced,
         "cost_cny": total_cost if priced else None,

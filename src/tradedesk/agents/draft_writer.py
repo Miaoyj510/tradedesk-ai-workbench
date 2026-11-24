@@ -36,6 +36,50 @@ from .prompts import (
 
 PLACEHOLDER_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+# ---- 词形数字（R19-03）——“拿不到真值”不等于“编不出价格” ----
+# 只扫"阿拉伯数字"的判定器，模型把价格写成英文单词（"four dollars fifty"）就能绕过。
+WORD_NUMBER_EN = (
+    r"(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|"
+    r"thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|"
+    r"million|billion|dozen)")
+WORD_NUMBER_CN = r"(?:\u4e00|\u4e8c|\u4e24|\u4e09|\u56db|\u4e94|\u516d|\u4e03|\u516b|\u4e5d|\u5341|\u767e|\u5343|\u4e07)"
+WORD_NUMBER_AR = (
+    r"(?:\u0648\u0627\u062d\u062f|\u0627\u062b\u0646\u0627\u0646|\u062b\u0644\u0627\u062b\u0629|\u0623\u0631\u0628\u0639\u0629|\u062e\u0645\u0633\u0629|"
+    r"\u0633\u062a\u0629|\u0633\u0628\u0639\u0629|\u062b\u0645\u0627\u0646\u064a\u0629|\u0639\u0634\u0631\u0629|\u0639\u0634\u0631\u064a\u0646|\u0645\u0627\u0626\u0629|\u0623\u0644\u0641)")
+# 货币词与数量单位（“数字 + 它”才算数值表达）
+MONEY_UNIT = (
+    r"(?:dollars?|euros?|usd|eur|rmb|cny|yuan|rupees?|rials?|"
+    r"\u5143|\u7f8e\u5143|\u6b27\u5143|\u0641\u064a\u0627\u0644|\u062f\u0648\u0644\u0627\u0631|"
+    r"pieces?|units?|pcs?|per\s+(?:piece|unit|pc|pcs)|\u53f0|\u4e2a|\u5757)")
+CURRENCY_DIGIT_RE = re.compile(
+    r"(?:usd|eur|rmb|cny|\$|\u20ac|\uffe5|\u5143|\u0641\u064a\u0627\u0644|\u062f\u0648\u0644\u0627\u0631)\s*[\d.,]+", re.I)
+CURRENCY_DIGIT_SUFFIX_RE = re.compile(
+    r"[\d.,]+\s*(?:\u5143|\u7f8e\u5143|\u6b27\u5143|\u0641\u064a\u0627\u0644|\u062f\u0648\u0644\u0627\u0631|dollars?|euros?)", re.I)
+WORD_MONEY_RE = re.compile(
+    r"(?:" + WORD_NUMBER_EN + r"|" + WORD_NUMBER_CN + r"|" + WORD_NUMBER_AR + r")"
+    r"(?:\s+(?:" + WORD_NUMBER_EN + r"))?\s*(?:" + MONEY_UNIT + r")", re.I)
+
+
+def numeric_fabrics(body: str) -> List[str]:
+    """发现“隐形数值”：模型自己写的价格/数量表达。
+
+    这里只拥有两种形态：
+      ① **币种 + 数字**（USD 12.50 / 12.50 元）；
+      ② **词形数字 + 货币/单位**（four dollars / twenty five per piece）。
+    普通的“数字 + 单位”（如 5000 units）不在这里拒：那类数字由「数字白名单」那一层去处理（让它们可以是买家原话里的）。
+    """
+    out: List[str] = []
+    m = CURRENCY_DIGIT_RE.search(body or "")
+    if m:
+        out.append("模型写出了币种数字（%s）" % m.group(0).strip())
+    m = CURRENCY_DIGIT_SUFFIX_RE.search(body or "")
+    if m:
+        out.append("模型写出了币种数字（%s）" % m.group(0).strip())
+    m = WORD_MONEY_RE.search(body or "")
+    if m:
+        out.append("模型写出了词形数字（%s）" % m.group(0).strip())
+    return out
 # 币种前缀：这些位置的数字是**报价**，必须来自知识库真值
 CURRENCY_NUM_RE = re.compile(r"(?:USD|EUR|\$|\u20ac|\uffe5)\s*(\d+(?:\.\d+)?)", re.I)
 
@@ -53,17 +97,23 @@ def numbers_of(text: str) -> set:
 # 模型正文的长度上下限（超出说明它在胡说或在贴提示词）
 MIN_BODY_CHARS = 40
 MAX_BODY_CHARS = 4000
+# 必填事实槽位（不包含证书句与追问句）：它们为空就不能出稿（R19-06）
+REQUIRED_FACT_KEYS = ("sku", "moq", "price_range", "terms", "port", "lead_time")
 
 
 class DraftRejected(RuntimeError):
     """模型输出不满足受控条件 —— 丢弃并退回模板。
 
-    带 `calls`：被拒绝前已经发过多少次 HTTP 调用（这些可能已经产生费用）。
+    带 `calls`：被拒绝前发过的 HTTP 调用可能已产生费用。
+    带 `usage`：**越权被拒时响应里是有 usage 的**（模型已经返回了正文，否则没有正文可判），
+    所以那一次调用**是花了钱的**，token 必须照记（R19-05）。
     """
 
-    def __init__(self, message: str, calls: int = 0) -> None:
+    def __init__(self, message: str, calls: int = 0,
+                 usage: Optional[Dict[str, Any]] = None) -> None:
         super().__init__(message)
         self.calls = calls
+        self.usage = usage or {}
 
 
 @dataclass
@@ -153,6 +203,8 @@ def check_model_body(text: str,
         if pat.search(body):
             problems.append("模型输出命中注入特征")
             break
+    # 隐形数值（R19-03）：写成英文单词的价格也要拒
+    problems.extend(numeric_fabrics(body))
     return problems
 
 
@@ -167,6 +219,12 @@ def render_facts(body: str, facts: Dict[str, str], lang: Optional[Language] = No
     真实测试里 ar/es 语种的模型常常漏写这些占位符，旧逻辑把它们当必填 → 整段丢弃、走模板，
     ar 出稿成功率因此只有 30%。
     """
+    # 必填事实空值 → 不出稿（R19-06）：价格为空时写出 "USD None–None"，
+    # 而 GATE-01 的价格模式**要有数字**，所以这样的草稿会**绕过价格签核闸门**——缺事实就不发。
+    missing = [k for k in REQUIRED_FACT_KEYS
+               if k in facts and not str(facts.get(k) or "").strip()]
+    if missing:
+        raise DraftRejected("必填事实槽位为空：" + ", ".join(missing))
     out = body or ""
     used = set()
     for key, value in facts.items():
@@ -227,18 +285,33 @@ class ModelDraftWriter:
         allowed, required = self.allowed_placeholders(with_cert)
         messages = build_messages(language, buyer_message, company=company,
                                   country=country, intents=intents, placeholders=allowed)
+        # 本次调用数（R19-04）：ChatClient.calls 是**进程累计值**，直接拿它会让落库的调用次数按 N(N+1)/2 膨胀。
+        before = int(getattr(self.chat, "calls", 0) or 0)
         try:
             result = self.chat.complete(messages, temperature=self.temperature,
                                         max_tokens=self.max_tokens)
         except LLMError as exc:
+            after = int(getattr(self.chat, "calls", 0) or 0)
             raise DraftRejected("模型调用失败：%s" % exc,
-                                calls=getattr(exc, "calls", 0)) from exc
+                                calls=max(0, after - before)) from exc
+        after = int(getattr(self.chat, "calls", 0) or 0)
+        calls = max(0, after - before)
+        usage: Dict[str, Any] = {
+            "provider": result.provider or "",
+            "model": result.model or getattr(self.chat, "model", ""),
+            "prompt_tokens": result.prompt_tokens,
+            "completion_tokens": result.completion_tokens,
+            "cached_tokens": int((result.raw.get("usage") or {}).get("prompt_tokens_details", {})
+                                 .get("cached_tokens", 0) or 0),
+            "total_tokens": result.total_tokens,
+            "calls": calls,
+        }
         problems = check_model_body(result.text, allowed, required,
                                      buyer_numbers=numbers_of(buyer_message),
                                      truth_numbers=truth_numbers)
         if problems:
-            raise DraftRejected("；".join(problems),
-                                calls=getattr(self.chat, "calls", 0))
+            # 越权被拒时**响应里有 usage**（R19-05）——这一次已经花了钱，token 必须照记。
+            raise DraftRejected("；".join(problems), calls=calls, usage=usage)
         provider = result.provider or (getattr(getattr(self.chat, "provider", None), "key", "") or "")
         model = result.model or getattr(self.chat, "model", "")
         # 计价在这里做（而不是写入点）：成本是“这一次出稿的事”，与草稿一起归属。
@@ -254,7 +327,7 @@ class ModelDraftWriter:
             cached_tokens=int((result.raw.get("usage") or {}).get("prompt_tokens_details", {})
                               .get("cached_tokens", 0) or 0),
             total_tokens=result.total_tokens,
-            calls=getattr(self.chat, "calls", 0),
+            calls=calls,          # 本次的调用数，不是进程累计值（R19-04）
             cost_cny=cost_cny,
             price_tier=tier,
         )

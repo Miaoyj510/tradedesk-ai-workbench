@@ -344,11 +344,12 @@ def test_pricing_table_is_sourced_and_dated():
 
 def test_estimate_cost_uses_official_price():
     from tradedesk.llm.pricing import estimate_cost
-    # 官方标准档：输入 4.20 元/百万，输出 16.80 元/百万
+    # 估算取**最贵的一档**（保守口径，R19-10）：表里 M3 有「≤512k 输入」与「>512k 输入」两档，
+    # 同样 100 万 token，取保守档就是取更贵的那一档。
     cost, tier = estimate_cost("MiniMax-M3", 1_000_000, 0)
-    assert abs(cost - 4.20) < 1e-9, f"价格口径不对：{cost}"
+    assert abs(cost - 8.40) < 1e-9, f"估算应取最贵档（保守）：{cost}"
     cost2, _ = estimate_cost("MiniMax-M3", 0, 1_000_000)
-    assert abs(cost2 - 16.80) < 1e-9
+    assert abs(cost2 - 33.60) < 1e-9
 
 
 def test_estimate_cost_unknown_model_returns_none():

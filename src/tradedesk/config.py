@@ -117,9 +117,12 @@ class Config:
             llm_provider=get("TRADEDESK_LLM_PROVIDER", "minimax"),
             llm_model=get("TRADEDESK_LLM_MODEL", ""),
             # 通用变量优先；旧的 MiniMax 变量保留作兼容（不破坏已有的本地 .env）。
+            # 只取“当前对话厂商自己的” key。
+            # **不再兑底到其他厂商的 key**（R19-01）：例如旧 .env 里还留着 MINIMAX_API_KEY，
+            # 而用户把 provider 改成 aliyun 就会把 MiniMax 的密钥发给 dashscope。
+            # 切厂商时要换厂商自己的 key（或用通用的 TRADEDESK_LLM_API_KEY）。
             llm_api_key=(get("TRADEDESK_LLM_API_KEY", "")
-                         or _vendor_env(_provider, "api_key_env")
-                         or get("MINIMAX_API_KEY", "")),
+                         or _vendor_env(_provider, "api_key_env")),
             # 基址地址**不能再回退到 MINIMAX_BASE_URL**：那样一切到阿里云就会拿 MiniMax 的地址。
             # 厂商专用的基址地址走 provider_base_urls，由工厂按厂商取。
             llm_base_url=get("TRADEDESK_LLM_BASE_URL", ""),

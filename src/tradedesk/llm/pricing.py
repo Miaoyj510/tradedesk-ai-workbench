@@ -75,12 +75,14 @@ def estimate_cost(model: str, prompt_tokens: int = 0, completion_tokens: int = 0
     """估算一次调用的成本。
 
     返回 (金额元, 档位说明)；**模型不在表里就返回 None**（不猜、不估算）。
-    多档位时取**标准档**（最保守的一档，避免低估成本）。
+
+    多档位时取**最贵的一档**（R19-10）：它是**保守口径**——估算尽量不低估真实成本。
+    （旧实现取的是最便宜的一档，而注释写的是“最保守”——一旦表里出现更便宜的档，估算就会低估。）
     """
     tiers = [p for p in find_prices(model) if "永久五折" not in p.tier]
     if not tiers:
         return None
-    p = min(tiers, key=lambda x: x.input_per_mtok * x.output_per_mtok)
+    p = max(tiers, key=lambda x: x.input_per_mtok * x.output_per_mtok)
     return (p.cost(prompt_tokens, completion_tokens, cached_tokens),
             "%s（%s）" % (p.tier, p.note))
 

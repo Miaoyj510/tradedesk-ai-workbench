@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""询盘回复的提示词资产（S5-1a；PRD 附录 14.6 清单）。
+"""询盘回复的提示词资产（S5-1a；PRD 附录 **14.5** 提示词资产清单 P-01~P-12）。
 
 这个文件存在的全部理由：让模型**看不到任何数值**
 ------------------------------------------------
@@ -60,16 +60,20 @@ ALL_PLACEHOLDERS = REQUIRED_PLACEHOLDERS + OPTIONAL_PLACEHOLDERS
 
 # 每个占位符**在语义上**是什么（不是值，是槽位说明）
 PLACEHOLDER_DOC: Dict[str, str] = {
-    PLACEHOLDER_SKU: "the product model / SKU the buyer asked about",
-    PLACEHOLDER_MOQ: "the minimum order quantity",
-    PLACEHOLDER_PRICE: "our reference price range, including the currency",
-    PLACEHOLDER_TERMS: "the Incoterm / trade terms",
-    PLACEHOLDER_PORT: "the shipment port",
-    PLACEHOLDER_LEAD: "the production lead time, with its unit",
-    PLACEHOLDER_CERT: "the certification statement covering this model",
-    PLACEHOLDER_ASK: ("the details we still need from the buyer (destination port, "
-                      "quantity, Incoterm) - insert it as a noun phrase where a "
-                      "'please confirm ...' sentence fits"),
+    # 短语型占位符：放在合适的语法位置。
+    PLACEHOLDER_SKU: "a short phrase: the product model / SKU the buyer asked about",
+    PLACEHOLDER_MOQ: "a short phrase: the minimum order quantity",
+    PLACEHOLDER_PRICE: "a short phrase: our reference price range, including the currency",
+    PLACEHOLDER_TERMS: "a short phrase: the Incoterm / trade terms",
+    PLACEHOLDER_PORT: "a short phrase: the shipment port",
+    PLACEHOLDER_LEAD: "a short phrase: the production lead time, with its unit",
+    # 整句型占位符：**整句替换，不要套壳**（R19-11）——
+    # 它自己就是一句完整的证书声明；模型若再套一句“The model is covered by ...”，
+    # 回填后就会出现“The model is covered by The model is covered by ...！”的复读。
+    PLACEHOLDER_CERT: ("a full sentence (verbatim): the certification statement covering this model - "
+                       "insert it as-is as a complete sentence, do not add any prefix or suffix"),
+    PLACEHOLDER_ASK: ("a noun phrase: the details we still need from the buyer (destination port, "
+                      "quantity, Incoterm) - insert it where a 'please confirm ...' sentence fits"),
 }
 
 LANG_NAME: Dict[Language, str] = {

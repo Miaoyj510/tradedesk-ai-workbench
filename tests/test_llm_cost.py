@@ -211,7 +211,9 @@ def test_degraded_draft_is_flagged_on_thread(wired):
     s = store.llm_usage_summary()
     assert s["count"] == 1
     assert s["degraded_count"] == 1
-    assert s["priced_count"] == 0, "降级的那一次拿不到 token → 不估算金额"
+    # 降级行也是花钱的（R19-05）：越权被拒时响应里有 usage → token 照记、成本照算。
+    assert s["priced_count"] == 1, "降级的那一次调用同样是花钱的，不能从成本里被剔掉"
+    assert s["cost_cny"] is not None and s["cost_cny"] > 0
 
 
 def test_unknown_model_is_not_priced(wired):

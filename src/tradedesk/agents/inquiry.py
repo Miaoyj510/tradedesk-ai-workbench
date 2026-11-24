@@ -339,13 +339,29 @@ class InquiryAgent(BaseAgent):
                 notes.append("模型出稿：%s（输入 %d / 输出 %d tokens，HTTP 调用 %d 次）"
                              % (model_name, md.prompt_tokens, md.completion_tokens, md.calls))
             except DraftRejected as exc:
-                # 降级也要记钱：被拒绝前发过的 HTTP 调用可能已产生费用。
-                # token 数拿不到（失败响应没有 usage）→ cost_cny 留 None，不估算。
-                llm_usage = {"provider": "", "model": "", "prompt_tokens": 0,
-                             "completion_tokens": 0, "cached_tokens": 0,
-                             "total_tokens": 0, "calls": exc.calls,
-                             "cost_cny": None, "price_tier": "", "degraded": True,
-                             "reject_reason": str(exc)}
+                # 降级也要记钱（R19-05）：越权被拒时**响应里是有 usage 的**（模型已经返回了正文，
+                # 正因为有正文才被判定器拒），所以 token 必须照记、成本必须照算。
+                # 只有“调用失败”（HTTP 错误/超时）才拿不到 usage → 那时才空着。
+                u = dict(exc.usage or {})
+                u.setdefault("provider", "")
+                u.setdefault("model", "")
+                u.setdefault("prompt_tokens", 0)
+                u.setdefault("completion_tokens", 0)
+                u.setdefault("cached_tokens", 0)
+                u.setdefault("total_tokens", 0)
+                u["calls"] = int(u.get("calls") or exc.calls or 0)
+                u.setdefault("cost_cny", None)
+                u.setdefault("price_tier", "")
+                u["degraded"] = True
+                u["reject_reason"] = str(exc)
+                if u.get("cost_cny") is None and u.get("model"):
+                    from ..llm.pricing import estimate_cost
+                    est = estimate_cost(str(u.get("model")),
+                                       int(u.get("prompt_tokens") or 0),
+                                       int(u.get("completion_tokens") or 0))
+                    if est is not None:
+                        u["cost_cny"], u["price_tier"] = est
+                llm_usage = u
                 notes.append("模型输出被拒（%s），退回模板草稿" % exc)
         if not country:
             next_action = "买家所在国未知：先确认目的港所在国（合规要求按目的国落地），再人工签核"

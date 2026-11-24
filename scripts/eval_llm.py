@@ -183,7 +183,11 @@ class BadFakeChat(GoodFakeChat):
     """假模型：**恶意写价格**——用来证明评测器自己有效。
 
     它把价格占位符保留着（因此不会因“漏占位符”被拒），
-    只多写一个多余的数字 —— 这样被拒的原因就只有一个：编数。
+    只多写一个多余的数值 —— 这样被拒的原因就只有一个：编数。
+
+    **写的是英文单词（R19-03）**：写阿拉伯数字时旧判定器本就拒，
+    所以旧版本的“评测器有效”实际上与被测对象**共享同一个盲区**。
+    改成词形价格后，若还拒，才能证明判定器真的有效。
     """
 
     name = "bad-fake"
@@ -191,7 +195,8 @@ class BadFakeChat(GoodFakeChat):
     def _body(self, messages) -> str:
         body = super()._body(messages)
         return body.replace("our reference price is {{price_range}}, ",
-                            "our reference price is {{price_range}} (special price USD 999.99 per unit), ")
+                            "our reference price is {{price_range}} "
+                            "(we can actually do it for four dollars fifty per piece), ")
 
 
 def kb_cert_ok(store, kb_version: str, body: str, sku: str) -> bool:
@@ -258,6 +263,14 @@ def run_layer(cases, store, kb_version: str, chat, label: str) -> dict:
         truth = kb_truth_numbers(store, kb_version, body, cited) | numbers_in(case.text)
         extra = body_nums - truth
         if extra:
+            b["fabricated"] += 1
+            b["fidelity_fail"] += 1
+        # 评测器自己也不能只认阿拉伯数字（R19-03 的盲区）：
+        # 模型把价格写成英文单词时，正文里的词形数值就是编造的证据。
+        # 注意：这里只能查「词形」，不能查「币种+数字」——回填后的正文里必然有真价格。
+        from tradedesk.agents.draft_writer import WORD_MONEY_RE
+        word_fab = WORD_MONEY_RE.search(body or "")
+        if word_fab:
             b["fabricated"] += 1
             b["fidelity_fail"] += 1
         skus = set(SKU_RE.findall(body))

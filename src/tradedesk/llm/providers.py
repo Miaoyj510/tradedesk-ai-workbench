@@ -127,14 +127,21 @@ def get_provider(key: str) -> Provider:
 GENERIC_KEY_ENV = "TRADEDESK_LLM_API_KEY"
 
 
-def resolve_api_key(provider: Provider, fallback: str = "") -> str:
-    """取 API key：厂商自己的环境变量 > 通用环境变量 > 配置里的 fallback。
+def resolve_api_key(provider: Provider, fallback: str = "",
+                    fallback_provider: str = "") -> str:
+    """取 API key：**厂商专用 > 通用 > fallback**。
+
+    `fallback` 是“对话厂商的 key”，**只在它确属于同一厂商时才能用**（R19-01）。
+    否则会把 A 厂商的密钥发给 B 厂商（例如把 MiniMax 的 key 发给 dashscope）——
+    而对方只会返回 401，用户只会以为是 key 填错。
 
     为什么还要一个通用变量：部署环境里通常只有一个密钥注入位，
-    换厂商时只要改环境变量名，不要修代码。
+    换厂商时只要改环境变量名，不要修代码。**通用 key 是你给“当前厂商”的，切厂商时必须换。
     """
     for env in (provider.api_key_env, GENERIC_KEY_ENV):
         value = os.environ.get(env, "").strip()
         if value:
             return value
-    return (fallback or "").strip()
+    if fallback and (not fallback_provider or fallback_provider == provider.key):
+        return fallback.strip()
+    return ""

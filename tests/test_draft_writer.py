@@ -291,8 +291,10 @@ def test_agent_falls_back_to_template_when_model_rejected(kb_agent):
     # 降级也要记钱（S5-1b）：被拒绝前发过的 HTTP 调用可能已产生费用。
     assert res.llm_usage is not None
     assert res.llm_usage["degraded"] is True
-    assert res.llm_usage["cost_cny"] is None, "失败调用拿不到 token → 不估算金额"
-    assert res.llm_usage["total_tokens"] == 0
+    # 越权被拒时响应里**是有 usage 的**（R19-05）——那一次调用已经花了钱，token 必须照记。
+    assert res.llm_usage["total_tokens"] > 0, "越权被拒的那次调用也要记 token"
+    assert res.llm_usage["calls"] == 1
+    assert "cost_cny" in res.llm_usage
     assert any("退回模板草稿" in n for n in res.notes)
     assert "CERT-CE-2041" in res.draft.body, "模板路径的证书仍在"
 

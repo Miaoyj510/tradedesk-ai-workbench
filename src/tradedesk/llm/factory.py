@@ -15,7 +15,8 @@ def build_chat_client(config: Config) -> Optional[ChatClient]:
         provider = get_provider(config.llm_provider)
     except KeyError:
         return None
-    key = resolve_api_key(provider, config.llm_api_key)
+    # fallback 属于本厂商（对话厂商），所以可以用（R19-01）
+    key = resolve_api_key(provider, config.llm_api_key, fallback_provider=provider.key)
     if not key:
         return None
     # 基址地址优先级：通用覆盖 > 厂商专用 > 厂商表默认
@@ -39,7 +40,11 @@ def build_embedder(config: Config):
         return None
     if not provider.supports_embedding:
         return None            # 例：DeepSeek 官方没有嵌入接口，语义通道得另配厂商
-    key = resolve_api_key(provider, config.llm_api_key)
+    # 嵌入厂商若不是对话厂商，就**不能借对话厂商的 key**（R19-01）：
+    # 拿不到自己的 key 就不建客户端 —— 缺嵌入通道时自动降级为词法+7ed3构化双通道。
+    # fallback（config.llm_api_key）始终属于**对话厂商**；嵌入厂商只有在自己就是对话厂商时才能用它。
+    fb_provider = config.llm_provider
+    key = resolve_api_key(provider, config.llm_api_key, fallback_provider=fb_provider)
     if not key:
         return None
     dim = config.embedder_dim or provider.embedding_dim
@@ -49,7 +54,8 @@ def build_embedder(config: Config):
                               model=config.embedder_model or provider.embedding_model or config.embedding_model,
                               dim=dim or config.embedding_dim,
                               timeout_s=config.llm_timeout_s, batch_size=config.embedder_batch_size,
-                              provider="minimax")
+                              provider="minimax",
+                              embedding_path=provider.embedding_path)
     return OpenAICompatibleEmbedder(provider=provider, api_key=key,
                                     base_url=config.embedder_base_url or provider.embedding_base_url,
                                     model=config.embedder_model or provider.embedding_model,
