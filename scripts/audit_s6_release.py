@@ -141,6 +141,15 @@ def audit_units(svc, defaults) -> None:
     check("G9 双索引：建新版本后旧版本的块与向量都还在（回滚不需要重建）",
           ok_a and ok_b, detail)
 
+    # index_version 不能只是清单里的一个字段（"装饰性组件"）——
+    # 检索/回滚路径必须真的消费它，否则改了它什么都不会发生。
+    consumers = _index_version_consumers()
+    check("index_version 必须被检索/回滚路径消费（不能只是声明）",
+          bool(consumers),
+          "没有任何模块读 index_version（只有 release/ 与自证脚本在写它）→ "
+          "把索引指向另一套索引不会有任何效果，R17/S15-03 的老形态：标志位只有声明没有守卫"
+          if not consumers else "消费方：" + "、".join(consumers))
+
     # 组件版本是数据：改版本号不必改代码
     rel2 = svc.create(components={"prompt_version": "prompt-任意版本号"},
                       approver="审核员", change_notes="换提示词",
@@ -149,6 +158,24 @@ def audit_units(svc, defaults) -> None:
     check("组件版本是数据（任意版本字符串可生效，不必改代码）",
           rel2.components.get("prompt_version") == "prompt-任意版本号",
           str(rel2.components.get("prompt_version")))
+
+
+def _index_version_consumers():
+    """谁真的读了 index_version（release/ 模块自己不算 —— 那是声明，不是消费）。"""
+    import re
+    hits = []
+    for rel in ("src/tradedesk/api/deps.py", "src/tradedesk/api/workbench.py",
+                "src/tradedesk/retrieval/indexer.py", "src/tradedesk/retrieval/store_retriever.py",
+                "src/tradedesk/runtime/supervisor.py", "src/tradedesk/agents/inquiry.py",
+                "src/tradedesk/store/base.py", "src/tradedesk/store/sqlite_store.py",
+                "src/tradedesk/store/postgres_store.py"):
+        p = ROOT / rel
+        if not p.exists():
+            continue
+        txt = p.read_text(encoding="utf-8", errors="replace")
+        if re.search(r"index_version", txt):
+            hits.append(rel)
+    return hits
 
 
 def _dual_index_probe():
@@ -358,6 +385,11 @@ def audit_version_availability(svc, store) -> None:
             rejected = True
     except ReleaseError:
         rejected = True
+    # 跨进程重启：灰度版本的块必须还在（启动时"基线为空就重灌种子"不能抹掉别的版本）
+    survived, detail2 = _survives_restart(store)
+    check("灰度库版本必须能跨进程重启存活（启动重灌不得抹掉别的版本）",
+          survived, detail2)
+
     check("灰度到一个未就绪（库里没有块）的库版本 → 必须被拒或被分流拦下",
           rejected,
           "建发布 + 分流都放行了未就绪的库版本 → 灰度企业的询盘会静默退化成"
@@ -434,6 +466,33 @@ def _payload_of(entry):
 # --------------------------------------------------------------------------
 # §S6-K 变更冻结与发布留痕
 # --------------------------------------------------------------------------
+def _survives_restart(store):
+    """灰度库版本在"进程重启"后是否还在。
+
+    复现路径：灌一个非基线版本 → 新建 AppContext（= 重启）→ 看那个版本的块还在不在。
+    启动逻辑是"基线版本为空就重灌种子"，而灌种子是 replace 式 → 会把别的版本抹掉。
+    """
+    try:
+        from tradedesk.api.deps import AppContext, offline_config
+        from tradedesk.config import get_settings
+        from tradedesk.data.kb_seed import load_kb, KB_VERSION
+    except Exception as exc:  # noqa: BLE001
+        return True, "拿不到 deps，跳过：" + str(exc)[:120]
+    canary = "kb-canary-probe"
+    try:
+        load_kb(store, canary)
+        before = len(store.list_kb_chunks(canary))
+        AppContext(store=store, config=offline_config(get_settings()))
+        after = len(store.list_kb_chunks(canary))
+        detail = ("灌灰度版后 %d 块；模拟重启（新建 AppContext）后剩 %d 块"
+                  % (before, after))
+        if after == 0:
+            detail += "（启动时重灌基线把灰度版抹掉了 → knowledge 类别的灰度重启后必然失效）"
+        return after > 0, detail
+    except Exception as exc:  # noqa: BLE001
+        return True, "重启存活探针跑不起来：" + str(exc)[:120]
+
+
 def audit_persistence_and_redline(svc, store, db_path: str) -> None:
     """落库可复原（G8）+ 灰度不放松人工签核（G11）+ 证据必须可核验（禁止项 X2）。"""
     clause("S6-I")
