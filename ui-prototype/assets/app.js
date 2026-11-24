@@ -520,8 +520,18 @@
   let AGENT_CACHE = null;
 
   function ensureAgentDrawer() {
+    // 复用判断用 **id**：DOM 桩对不存在的选择器会返回一个"凭空造的元素"，
+    // 只判存在会把抽屉当成已存在 → 永远不创建、永远没内容（R24-06 的坑）。
     let drawer = $('#agent-drawer');
-    if (drawer) return drawer;
+    if (drawer && drawer.id === 'agent-drawer') {
+      if (!drawer.__bound) {
+        drawer.__bound = true;
+        const closeBtn0 = $('#agent-drawer-close');
+        if (closeBtn0) closeBtn0.addEventListener('click', closeAgentDrawer);
+        drawer.addEventListener('click', e => { if (e.target === drawer) closeAgentDrawer(); });
+      }
+      return drawer;
+    }
     drawer = document.createElement('div');
     drawer.className = 'drawer';
     drawer.id = 'agent-drawer';
@@ -536,7 +546,7 @@
     document.body.appendChild(drawer);
     // 关闭事件的绑定必须**跟着创建走**：抽屉是点击时才出现的，
     // 在页面加载时绑定根本绑不上（那时元素还不存在）—— 叉号点了没反应就是这么来的。
-    const closeBtn = drawer.querySelector('#agent-drawer-close');
+    const closeBtn = $('#agent-drawer-close');
     if (closeBtn) closeBtn.addEventListener('click', closeAgentDrawer);
     drawer.addEventListener('click', e => { if (e.target === drawer) closeAgentDrawer(); });
     return drawer;
@@ -885,6 +895,32 @@
       host.innerHTML = rows;
       $('#kb-date-label').textContent = '检索基准日：' + dateStr + '（法规与证书按「买家所在国 + 当前日期」过滤）';
     }
+    // 术语表数量：读**实数**，并把与 PRD 要求的差距写在界面上（R24-02）。
+    // 之前这里写死"200 概念"，而实际只有 2 块 —— 写死一个未达标的数字，
+    // 等于把"没做到"显示成"做到了"。
+    const termsHint = document.querySelector('#kb-terms-hint');
+    if (termsHint) {
+      const n = (D.terms || []).length;
+      termsHint.textContent = n + ' 概念 × zh/en/es/ar（含禁用译法）'
+        + (n >= 200 ? '' : ' —— PRD 要求 ≥200，本期仅 ' + n + '，未达标');
+    }
+    // 嵌入 / 重排：读后端**真实状态**，不写死模型名（R24-03）。
+    // 之前写死 BGE-M3 / bge-reranker-v2-m3，而实际嵌入是 embo-01，
+    // 重排更是只有配置项、没有消费点 —— 那属于"装饰性声明"。
+    const embedHint = document.querySelector('#kb-embed-hint');
+    if (embedHint && window.TDApi && window.TDApi.req) {
+      try {
+        window.TDApi.req('/health').then(h => {
+          const e = (h && h.embedding) || {};
+          embedHint.textContent = (e.enabled ? (e.model || '已启用') : '未启用（占位，稠密通道关闭）')
+            + (e.dim ? ' · ' + e.dim + ' 维' : '')
+            + ' · 重排未实现（PRD 原定，本期无消费点）';
+        }).catch(() => { embedHint.textContent = '读取失败'; });
+      } catch (err) {
+        embedHint.textContent = '读取失败';
+      }
+    }
+
     const di = $('#kb-date');
     di.value = '2026-11-17';
     di.addEventListener('change', e => render(e.target.value));

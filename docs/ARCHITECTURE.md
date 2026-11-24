@@ -1,6 +1,8 @@
 # 一页架构（TradeDesk-AI · 外贸业务员的 AI 数字员工工作台）
 
 > 与代码一一对应；图里的每个方框都能在 `src/tradedesk/` 里找到同名模块。
+> **嵌入与重排的口径**：嵌入是 `embo-01`（1536 维，云端）；**重排模型本期未实现** ——
+> 检索里的「重排」是 RRF 融合排序，不是 PRD 原定的 bge-reranker。
 > 本期交付范围：PRD 第 1 章第 22 行 —— **询盘应答 Agent + 多语种知识库 / 交易风控 Agent + 人工签核闸门 / 调度器路由与询盘线程状态机**；
 > Merch、Growth 两个角色**只声明不实现**（图中用虚线标出）。
 
@@ -21,8 +23,8 @@ flowchart TB
 
   subgraph A["② 单 Agent 层（自主执行）"]
     direction TB
-    EVA["Inquiry 询盘应答 Agent<br/>Eva：意图识别 / 产品匹配 / 草稿生成"]
-    SEN["Sentinel 交易风控 Agent<br/>Grace：名单核验 / 风险分级"]
+    EVA["Inquiry 询盘应答 Agent<br/>意图识别 / 产品匹配 / 草稿生成"]
+    SEN["Sentinel 交易风控 Agent<br/>名单核验 / 风险分级"]
     MERCH["Merch 商品运营<br/>仅声明（工具接口存在，无实现）"]
     GROW["Growth 推广<br/>仅声明（工具接口存在，无实现）"]
   end
@@ -31,7 +33,7 @@ flowchart TB
     direction TB
     KB["多语种产品与合规知识库<br/>zh / en / es / ar · 200 概念术语表"]
     PIPE["三通道 RRF 管线<br/>词法 + 结构化 + 稠密"]
-    EMB["嵌入 BGE-M3<br/>重排 bge-reranker-v2-m3"]
+    EMB["嵌入 embo-01（1536 维 · 云端）<br/>重排：PRD 原定，本期未实现"]
   end
 
   subgraph S["存储与留痕"]
@@ -72,7 +74,7 @@ sequenceDiagram
   participant API as FastAPI
   participant SUP as Supervisor
   participant SEN as Sentinel（风控）
-  participant EVA as Inquiry（Eva）
+  participant EVA as Inquiry
   participant RAG as 检索层
   participant H as 人审闸门
   participant H2 as 业务员
@@ -134,7 +136,7 @@ flowchart LR
   Q["买家提问<br/>（多语种）"] --> R1["① 跨语种召回<br/>多语种嵌入 + 术语表扩展<br/>西语提问命中中文产品库"]
   R1 --> R2["② 合规时效过滤<br/>按「买家所在国 + 当前日期」<br/>过期证书 / 废止条款被剔除"]
   R2 --> R3["③ 结构化 + 非结构化混合<br/>规格走属性过滤<br/>证书与话术走语义召回"]
-  R3 --> RRF["三路 RRF 融合 → 统一重排"]
+  R3 --> RRF["三路 RRF 融合（**融合，不是重排模型**）"]
   RRF --> OUT["证据（每条可回指）<br/>→ 草稿里的引用标签"]
 ```
 
@@ -177,7 +179,7 @@ flowchart TB
 | --- | --- | --- |
 | domain | `state_machine` `agentspec` `models` `enums` | 8 状态迁移、角色契约、领域模型（纯函数，无 IO） |
 | runtime | `supervisor` `gates` `handoff` `watchdog` | 路由与仲裁、11 条闸门与闸门令牌、15 字段交接、SLA 扫描 |
-| agents | `inquiry` `sentinel` `draft_writer` `prompts` `registry` | Eva、Grace、模型出稿、提示词资产、角色注册表 |
+| agents | `inquiry` `sentinel` `draft_writer` `prompts` `registry` | Inquiry、Sentinel、模型出稿、提示词资产、角色注册表 |
 | retrieval | `pipeline` `lexical` `indexer` `store_retriever` `embedders` | 三通道 RRF、向量索引、按库版本取块的检索器 |
 | release | `manifest` `bucketing` `service` | 发布清单、按企业分桶、推进与分类别回滚 |
 | api | `app` `deps` `auth` `workbench` | HTTP 接口、依赖装配、本地账号会话、读模型 BFF |

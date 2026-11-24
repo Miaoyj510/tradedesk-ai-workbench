@@ -310,6 +310,18 @@ def row_to_chunk(row: Dict[str, Any], mapping: Dict[str, str], kb_version: str,
     if lang not in ("zh", "en", "es", "ar"):
         warnings.append(_warn(row_no, "lang", "语种 %r 不在支持范围（zh/en/es/ar）" % lang))
 
+    # PRD 9.3：产品条目的**正文不得含数值** —— 数值走结构化属性（属性过滤），
+    # 进了正文就会被语义召回按"约等于"命中，价格类数字尤其危险。
+    if doc_type == "产品条目" and re.search(r"\d", text or ""):
+        errors.append(_err(row_no, "text",
+                           "产品条目正文不得含数值（PRD 9.3）：数值请放到 price_low / price_high / moq 等"
+                           "结构化属性列，走属性过滤；正文里的数字会被语义召回当成「约等于」的值"))
+        return None, errors, warnings
+    if doc_type == "名单条目":
+        warnings.append(_warn(row_no, "doc_type",
+                              "名单条目不参与 Sentinel 筛查（筛查读的是独立名单表，不是知识库）——"
+                              "导入它不会带来筛查能力；名单源需另行授权（PRD 13.4.12）"))
+
     identifiers.setdefault("doc_ref", doc_id)
 
     chunk = KBChunk(
@@ -333,11 +345,24 @@ def row_to_chunk(row: Dict[str, Any], mapping: Dict[str, str], kb_version: str,
 
 
 def make_kb_version(content: str, explicit: str = "") -> str:
-    """版本号：同内容同版本（幂等重导不会到处生版本），不同内容不同版本。"""
+    """版本号：**纯内容哈希**（同内容永远是同一版本，跨月也成立）。
+
+    早先带月份前缀 → "同内容同版本"跨月即破，注释口径是假的（R24-12.4）。
+    现在版本号只由内容决定：同一份文件重导多少次都是同一个版本号。
+    导入时间在**审计**里留痕，不塞进版本号。
+    """
     if explicit:
         return explicit.strip()
-    digest = hashlib.sha256((content or "").encode("utf-8")).hexdigest()[:6]
-    return "kb-%s-%s" % (datetime.now(timezone.utc).strftime("%Y.%m"), digest)
+    digest = hashlib.sha256((content or "").encode("utf-8")).hexdigest()[:10]
+    return "kb-%s" % digest
+
+
+def _same_content(existing, incoming) -> bool:
+    """两个版本集合的内容是否完全一致（按 chunk_id + 内容指纹比）。"""
+    from ..retrieval.indexer import chunk_fingerprint
+    a = {c.chunk_id: chunk_fingerprint(c) for c in existing}
+    b = {c.chunk_id: chunk_fingerprint(c) for c in incoming}
+    return a == b
 
 
 def import_kb(store, *, content: str, filename: str = "", fmt: str = "auto",
@@ -364,6 +389,16 @@ def import_kb(store, *, content: str, filename: str = "", fmt: str = "auto",
     rows, cols, row_errors = parse_rows(content, fmt)
     version = make_kb_version(content, kb_version)
 
+    # ---- R24-01：导入**不得改写已在服务的版本** ----
+    # 显式指定一个已存在的 kb_version，就等于绕过发布流程直接改生产语料：
+    # 结构化通道会立刻按新价格对外，而发布台账里没有这次改动
+    # （无灰度、无观察窗、无回滚路径），旧向量还在 → 两个版本的事实同时存在。
+    # 规则：**同内容重导 = 幂等**（允许）；**不同内容 → 拒绝**。
+    try:
+        existing = store.list_kb_chunks(version) if version else []
+    except Exception:
+        existing = []
+
     # 总行数要**含解析阶段就被拒的行**（比如 CSV 字段数不符）：
     # 否则报告会写着"拒绝 0 行"却带着错误，自相矛盾。
     report = ImportReport(kb_version=version, filename=filename, format=fmt,
@@ -387,6 +422,14 @@ def import_kb(store, *, content: str, filename: str = "", fmt: str = "auto",
         seen[chunk.chunk_id] = idx
         report.chunks.append(chunk)
         report.accepted += 1
+
+    if existing:
+        incoming = [c for c in report.chunks]
+        if not incoming or not _same_content(existing, incoming):
+            raise ValueError(
+                "库版本 %s 已存在（%d 块）且内容不同 —— 导入不能改写已在服务的版本。"
+                "请换一个版本号（自动版本号已按内容生成），或走发布流程（灰度 / 回滚）。"
+                % (version, len(existing)))
 
     if report.errors and not skip_bad_rows:
         # 有错就不落库：宁可让用户改文件，也不要落一半
@@ -412,8 +455,11 @@ def import_kb(store, *, content: str, filename: str = "", fmt: str = "auto",
             "mapping": {k: v for k, v in mp.items() if DEFAULT_MAPPING.get(k) != v},
             "skipped_bad_rows": bool(skip_bad_rows),
         })
-    except Exception:
-        pass
+    except Exception as exc:
+        # R24-07：审计写失败**不静默吞**。导入已落库却没留痕 = 不可追责，
+        # 与"append-only 审计链"的对外主张矛盾；但也不该让已落库的导入变成错误响应
+        # —— 所以把它作为**告警**返回，让人看得见。
+        report.warnings.append(_warn(0, "audit", "审计留痕失败：%s（导入已落库，但这次导入没有审计记录）" % exc))
     return report
 
 

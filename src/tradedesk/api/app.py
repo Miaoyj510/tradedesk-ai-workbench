@@ -165,6 +165,16 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
             "version": APP_VERSION,
             "backend": backend,
             "agents": [s.agent_id for s in app.state.ctx.registry.specs()],
+            # 嵌入 / 重排的真实状态（R24-03）：界面**不许写死模型名** ——
+            # 写死过一次（BGE-M3 / bge-reranker-v2-m3），而实际是 embo-01，
+            # 重排更是只有声明没有消费点。重排本期未实现，这里据实说。
+            "embedding": {
+                "model": getattr(app.state.ctx.config, "embedding_model", ""),
+                "dim": int(getattr(app.state.ctx.config, "embedding_dim", 0) or 0),
+                "enabled": bool(getattr(app.state.ctx.config, "embedder_enabled", False)),
+                "reranker_model": getattr(app.state.ctx.config, "reranker_model", ""),
+                "reranker_enabled": False,
+            },
             "time": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
         }
 
@@ -412,6 +422,18 @@ def create_app(context: Optional[AppContext] = None) -> FastAPI:
             embedder = NullEmbedder()
             notes.append("未配置嵌入器：已用**占位向量**建索引，稠密通道不启用"
                          "（占位向量没有语义能力，不能当作语义召回）")
+        # R24-08：维度必须与库的向量列一致 —— pgvector 的 vector(N) **拒绝错误维度**
+        # （CLAUDE.md 已录这个坑）。占位嵌入器 256 维、库列 1536 维 → 插不进去。
+        # 这里明确拒绝并说清原因，而不是让调用方撞一个 502。
+        want_dim = int(getattr(embedder, "dim", 0) or 0)
+        have_dim = int(getattr(app.state.ctx.store, "vector_dim", 0) or 0)
+        if want_dim and have_dim and want_dim != have_dim:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "dim_mismatch",
+                         "message": "嵌入器维度 %d 与库向量列维度 %d 不一致 —— 向量插不进去"
+                                    "（pgvector 拒绝错误维度）。请配置真实嵌入器，"
+                                    "或重建向量列后重试。" % (want_dim, have_dim)})
         try:
             res = index_kb(app.state.ctx.store, embedder, version, chunks=blocks)
         except Exception as exc:

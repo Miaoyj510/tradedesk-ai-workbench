@@ -166,6 +166,48 @@ def test_import_leaves_other_versions_untouched(store):
     assert len(store.list_kb_chunks(first.kb_version)) == before
 
 
+def test_explicit_version_cannot_overwrite_an_existing_one(store):
+    """R24-01：显式 kb_version 不得改写**已在服务的版本**。
+
+    否则就是绕过发布流程直接改生产语料：结构化通道立刻按新价格对外，
+    而发布台账里没有这次改动（无灰度、无观察窗、无回滚路径）。
+    """
+    first = import_kb(store, content=CSV_OK, filename="a.csv", dry_run=False)
+    with pytest.raises(ValueError) as ei:
+        import_kb(store, content=CSV_CERT, filename="cert.csv",
+                  kb_version=first.kb_version, dry_run=False)
+    assert "已存在" in str(ei.value)
+    # 原版本内容没有被改
+    chunk = [c for c in store.list_kb_chunks(first.kb_version)
+             if c.identifiers.get("sku") == "X-900"][0]
+    assert chunk.extra["price_low"] == 7.10
+
+
+def test_same_content_reimport_is_idempotent(store):
+    """同内容重导 = 幂等（同一版本号、内容一致 → 允许）。"""
+    first = import_kb(store, content=CSV_OK, filename="a.csv", dry_run=False)
+    again = import_kb(store, content=CSV_OK, filename="a.csv", dry_run=False)
+    assert again.kb_version == first.kb_version
+    assert again.written == first.written
+    assert len(store.list_kb_chunks(first.kb_version)) == first.written
+
+
+def test_product_text_with_number_is_rejected(store):
+    """PRD 9.3：产品条目正文不得含数值（数值走属性过滤）。"""
+    bad = "sku,title,text,lang,doc_type\nX-1,标题,价格 4.85 美元,zh,产品条目\n"
+    rep = import_kb(store, content=bad, filename="bad.csv", dry_run=False)
+    assert rep.accepted == 0 and rep.rejected == 1
+    assert "不得含数值" in rep.errors[0]["message"]
+
+
+def test_sanctions_chunk_import_warns_that_it_does_not_add_screening(store):
+    """名单条目不参与 Sentinel 筛查（筛查读独立名单表）→ 导入时要说清楚。"""
+    csv = "cert_no,title,text,doc_type,countries,valid_until\nCN-1,某企业,命中,名单条目,CN,2027-01-01\n"
+    rep = import_kb(store, content=csv, filename="s.csv", dry_run=False)
+    assert rep.accepted == 1
+    assert any("不参与 Sentinel 筛查" in w["message"] for w in rep.warnings)
+
+
 # ------------------------------------------------------------------ HTTP
 def test_api_dry_run_is_default_and_does_not_write(client):
     r = client.post("/kb/import", json={"filename": "a.csv", "content": CSV_OK})
